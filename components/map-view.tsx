@@ -3,7 +3,7 @@
 import maplibregl, { type Map as MapLibreMap } from 'maplibre-gl';
 import { useEffect, useRef } from 'react';
 
-import { CONGESTION_COLORS, UNKNOWN_COLOR } from '@/lib/congestion';
+import { CONGESTION_COLORS, UNKNOWN_COLOR, formatPeople } from '@/lib/congestion';
 import type { AreaCongestion, BikeStation } from '@/lib/types';
 
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -18,6 +18,28 @@ const SEOUL_BOUNDS: [[number, number], [number, number]] = [
 
 const AREA_SOURCE = 'areas';
 const BIKE_SOURCE = 'bikes';
+/*
+  인구 라벨 전용 포인트 소스.
+  text-field 는 layout 속성이라 feature-state 를 못 읽는다. 폴리곤 소스(fill/outline)는
+  feature-state 로 혼잡도를 칠하지만, 라벨에 사람 수를 얹으려면 값이 properties 에 있어야 한다.
+  그래서 areas 의 중심 좌표로 별도 포인트 소스를 만들어 데이터가 갱신될 때마다 setData 로 갈아끼운다.
+*/
+const LABEL_SOURCE = 'area-labels';
+
+/*
+  라벨 텍스트: 장소명(작게·연회색) + 줄바꿈 + 사람 수(크게·흰색).
+  미상인 곳은 people='' 로 내려오므로 줄바꿈째 생략해 이름만 한 줄로 보인다(없는 숫자를 만들지 않는다).
+  format 의 각 구간 색은 흰↔검은 헤일로 대비라 WCAG 4.5:1 을 크게 웃돈다(흰↔#09090b ≈ 19:1).
+*/
+const LABEL_FIELD = [
+  'format',
+  ['get', 'nm'],
+  { 'font-scale': 0.8, 'text-color': '#e2e8f0' },
+  ['case', ['==', ['get', 'people'], ''], '', '\n'],
+  {},
+  ['get', 'people'],
+  { 'font-scale': 1.15, 'text-color': '#ffffff' },
+] as unknown as maplibregl.ExpressionSpecification;
 
 interface MapViewProps {
   areas: AreaCongestion[];
@@ -131,23 +153,37 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect, bottomI
         },
       });
 
+      // 라벨은 areas 가 오기 전엔 비어 있다가 아래 effect 가 setData 로 채운다.
+      map.addSource(LABEL_SOURCE, {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+
       map.addLayer({
         id: 'area-label',
         type: 'symbol',
-        source: AREA_SOURCE,
+        source: LABEL_SOURCE,
         layout: {
-          'text-field': ['get', 'nm'],
-          'text-size': 11,
+          'text-field': LABEL_FIELD,
+          // 멀리서는 작게, 가까이서 크게. 한 표현식에 zoom interpolate 는 딱 한 번만(이중 쓰면 레이어가 통째로 거부됨).
+          'text-size': ['interpolate', ['linear'], ['zoom'], 9, 10, 13, 12, 16, 14],
           // CARTO 글리프 서버에 존재하는 스택이어야 한다. 한글은 NanumBarunGothic 이 받는다.
           'text-font': ['Open Sans Regular', 'NanumBarunGothic Regular'],
+          'text-line-height': 1.05,
+          'text-max-width': 7,
+          // 121곳이 다 뜨면 못 읽는다. 겹치면 자동으로 감추되(allow-overlap:false),
+          // 사람 많은 곳부터 살아남게 정렬 키를 음수 인구로 준다(값이 작을수록 먼저 그려져 충돌에서 이김).
           'text-allow-overlap': false,
+          'symbol-sort-key': ['-', 0, ['coalesce', ['get', 'pop'], 0]],
         },
         paint: {
-          'text-color': '#e5e7eb',
+          'text-color': '#ffffff',
           'text-halo-color': '#09090b',
-          'text-halo-width': 1.4,
+          'text-halo-width': 1.8,
+          'text-halo-blur': 0.3,
+          // stale(과거값)인 곳은 라벨도 흐리게 — 폴리곤 명도 저하와 같은 신호. 문구는 목록·상세가 담당한다.
+          'text-opacity': ['case', ['boolean', ['get', 'stale'], false], 0.55, 1],
         },
-        minzoom: 11.5,
       });
 
       map.addSource(BIKE_SOURCE, {
@@ -271,6 +307,42 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect, bottomI
     };
 
     if (loadedRef.current && map.getSource(AREA_SOURCE)) apply();
+    else map.once('idle', apply);
+  }, [areas]);
+
+  /*
+    인구 라벨 소스 갱신.
+    feature-state 로는 text-field 를 못 채우므로, 사람 수를 properties 에 담은 포인트를 매 갱신마다 새로 그린다.
+    people 은 목록과 똑같이 formatPeople(area.max) 로 굳혀 형식을 일치시킨다(미상이면 max=null → '' 로 이름만).
+  */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || areas.length === 0) return;
+
+    const apply = () => {
+      const source = map.getSource(LABEL_SOURCE) as maplibregl.GeoJSONSource | undefined;
+      if (!source) return;
+      source.setData({
+        type: 'FeatureCollection',
+        features: areas.map((area) => {
+          const known = area.rank >= 0 && area.max !== null;
+          return {
+            type: 'Feature' as const,
+            geometry: { type: 'Point' as const, coordinates: [area.lon, area.lat] },
+            properties: {
+              nm: area.nm,
+              // 미상은 사람 수 문구를 아예 비운다 — 없는 숫자를 지도에 쓰지 않는다.
+              people: known ? formatPeople(area.max) : '',
+              // 충돌 정렬용: 사람 많은 곳 우선. 미상(0)은 자리가 남을 때만.
+              pop: known ? area.max : 0,
+              stale: area.stale,
+            },
+          };
+        }),
+      });
+    };
+
+    if (loadedRef.current && map.getSource(LABEL_SOURCE)) apply();
     else map.once('idle', apply);
   }, [areas]);
 
