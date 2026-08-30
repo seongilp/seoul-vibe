@@ -25,6 +25,11 @@ interface MapViewProps {
   showBikes: boolean;
   selectedCd: string | null;
   onSelect: (cd: string) => void;
+  /**
+   * 지도 하단에서 다른 UI(바텀시트)가 가리는 비율(0..1).
+   * 첫 fitBounds 때만 쓴다 — 시트를 드래그할 때마다 지도가 움직이면 멀미가 난다.
+   */
+  bottomInsetRatio?: number;
 }
 
 /** rank(-1..3) → 색상 을 maplibre 표현식으로. feature-state 가 없으면 미상 색. */
@@ -42,7 +47,7 @@ const FILL_COLOR = [
   UNKNOWN_COLOR,
 ] as unknown as maplibregl.ExpressionSpecification;
 
-export function MapView({ areas, bikes, showBikes, selectedCd, onSelect }: MapViewProps) {
+export function MapView({ areas, bikes, showBikes, selectedCd, onSelect, bottomInsetRatio = 0 }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const loadedRef = useRef(false);
@@ -53,6 +58,10 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect }: MapVi
   useEffect(() => {
     onSelectRef.current = onSelect;
   }, [onSelect]);
+  const bottomInsetRef = useRef(bottomInsetRatio);
+  useEffect(() => {
+    bottomInsetRef.current = bottomInsetRatio;
+  }, [bottomInsetRatio]);
 
   /* 지도 생성: 한 번만. */
   useEffect(() => {
@@ -178,7 +187,20 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect }: MapVi
       if (!box || box.width < 1 || box.height < 1 || fittedRef.current) return;
       fittedRef.current = true;
       map.resize();
-      map.fitBounds(SEOUL_BOUNDS, { padding: 24, duration: 0 });
+      /*
+        바텀시트가 아래를 덮으므로 그만큼 패딩을 준다. 안 주면 서울이 컨테이너
+        전체 기준으로 가운데 정렬돼서 시트 뒤로 절반쯤 숨는다. 줌은 세로로 긴
+        화면에서 어차피 가로 폭이 결정하므로 이 패딩으로 바뀌지 않는다.
+      */
+      map.fitBounds(SEOUL_BOUNDS, {
+        padding: {
+          top: 24,
+          left: 24,
+          right: 24,
+          bottom: 24 + box.height * bottomInsetRef.current,
+        },
+        duration: 0,
+      });
     });
     observer.observe(containerRef.current);
 

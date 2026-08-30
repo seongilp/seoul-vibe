@@ -189,3 +189,37 @@
 .maplibregl-ctrl-attrib a {
   color: var(--muted-foreground);
 }
+
+/* ------------------------------------------------------------------ */
+/* 모바일: maplibre 기본 컨트롤이 바텀시트와 겹치는 문제                  */
+/* ------------------------------------------------------------------ */
+
+/*
+  저작권 배지는 bottom-right 고정이라 시트가 올라오면 그대로 가린다.
+  컨트롤은 지도 DOM 안에 있어 React 로 위치를 못 주므로, BottomSheet 가
+  부모에 흘려보낸 --sheet-h(실제 시트 높이, 드래그 중에도 갱신)만큼 밀어 올린다.
+  시트가 없는 화면에서는 변수가 없어 0px 로 떨어져 기존 위치 그대로다.
+*/
+/*
+  .maplibregl-map 을 앞에 붙여 명시도를 (0,2,0) 으로 올린다. maplibre-gl.css 는
+  map-view.tsx 에서 import 되어 이 파일보다 뒤에 실릴 수 있는데, 같은 명시도면
+  나중에 실린 쪽이 이겨서 bottom:0 으로 되돌아간다(실제로 그렇게 안 먹었다).
+*/
+@media (max-width: 767px) {
+  .maplibregl-map .maplibregl-ctrl-bottom-left,
+  .maplibregl-map .maplibregl-ctrl-bottom-right {
+    bottom: calc(var(--sheet-h, 0px) + env(safe-area-inset-bottom));
+    transition: bottom 300ms ease-out;
+  }
+}
+
+/*
+  터치 기기에서 maplibre 기본 버튼은 29px 라 최소 터치 타깃 44px 에 못 미친다.
+  아이콘은 그대로 두고 버튼 상자만 키운다.
+*/
+@media (pointer: coarse) {
+  .maplibregl-map .maplibregl-ctrl-group button {
+    width: 44px;
+    height: 44px;
+  }
+}

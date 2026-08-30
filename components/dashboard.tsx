@@ -6,10 +6,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { AreaDetail } from '@/components/area-detail';
 import { AreaList } from '@/components/area-list';
+import { BottomSheet, SNAP_RATIO, type SheetSnap } from '@/components/bottom-sheet';
 import { Legend } from '@/components/legend';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useIsMobile } from '@/lib/use-media-query';
 import type { BikeResponse, CongestionResponse } from '@/lib/types';
 
 // maplibre 는 window 에 의존하므로 SSR 을 끈다.
@@ -37,6 +39,9 @@ export function Dashboard() {
   const [selectedCd, setSelectedCd] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 모바일 바텀시트 높이. md 이상에서는 시트를 아예 렌더하지 않으므로 무시된다. */
+  const [snap, setSnap] = useState<SheetSnap>('peek');
+  const isMobile = useIsMobile();
 
   // 순수 fetch. setState 를 하지 않아 effect 본문에서 동기 호출해도 연쇄 렌더가 없다.
   const fetchCongestion = useCallback(async (): Promise<CongestionResponse> => {
@@ -150,9 +155,33 @@ export function Dashboard() {
     [areas],
   );
 
+  /*
+    선택 시 시트를 반쯤 올린다. peek(28%) 로 두면 상세 첫 줄만 보여서 두 번 만져야 한다.
+    이미 사용자가 half/full 로 올려 뒀다면 그 높이를 존중한다.
+    effect 가 아니라 핸들러에서 처리해야 연쇄 렌더가 안 난다(이 파일의 기존 방침).
+  */
+  const handleSelect = useCallback((cd: string) => {
+    setSelectedCd(cd);
+    setSnap((current) => (current === 'peek' ? 'half' : current));
+  }, []);
+
+  /** 상세를 닫으면 목록으로 돌아가되, 지도를 최대한 돌려주기 위해 peek 까지 내린다. */
+  const handleCloseDetail = useCallback(() => {
+    setSelectedCd(null);
+    setSnap('peek');
+  }, []);
+
+  // 목록 모드일 때만 시트 상단에 제목을 얹는다. 상세는 AreaDetail 이 자체 헤더를 갖는다.
+  const sheetHeader = selected ? null : (
+    <div className="px-4 pb-2">
+      <p className="text-sm font-bold">장소 {sortedAreas.length}곳</p>
+      <p className="text-muted-foreground text-xs">붐비는 순 · 탭하면 상세</p>
+    </div>
+  );
+
   return (
-    <div className="flex h-dvh flex-col">
-      <header className="border-border flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-3">
+    <div className="flex h-dvh flex-col overflow-hidden overscroll-none">
+      <header className="border-border flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b py-3 pt-[max(0.75rem,env(safe-area-inset-top))] pr-[max(1rem,env(safe-area-inset-right))] pl-[max(1rem,env(safe-area-inset-left))]">
         <Activity className="text-primary size-5" aria-hidden />
         <h1 className="text-base font-bold">Seoul Vibe</h1>
         <span className="text-muted-foreground hidden text-xs sm:inline">
@@ -201,7 +230,7 @@ export function Dashboard() {
       <div className="flex min-h-0 flex-1">
         <nav className="border-border hidden w-72 shrink-0 border-r lg:block">
           {congestion ? (
-            <AreaList areas={sortedAreas} selectedCd={selectedCd} onSelect={setSelectedCd} />
+            <AreaList areas={sortedAreas} selectedCd={selectedCd} onSelect={handleSelect} />
           ) : (
             <div className="space-y-2 p-4">
               {Array.from({ length: 12 }, (_, index) => (
@@ -217,14 +246,51 @@ export function Dashboard() {
             bikes={bikes?.stations ?? []}
             showBikes={showBikes}
             selectedCd={selectedCd}
-            onSelect={setSelectedCd}
+            onSelect={handleSelect}
+            // 시트가 처음 덮는 만큼(peek) 비워 두고 서울을 그 위에 맞춘다.
+            bottomInsetRatio={isMobile ? SNAP_RATIO.peek : 0}
           />
-          <Legend showBikes={showBikes} occluded={selected !== null} />
+          <Legend showBikes={showBikes} />
+
+          {/*
+            모바일 바텀시트. main 안에 직접 두는 게 두 가지 이유로 중요하다.
+            (1) 이전 패널은 absolute inset-y-0 인데 positioned 조상이 없어 뷰포트
+                기준으로 잡혔고, 그래서 헤더까지 덮어 로고가 "S" 만 남았다.
+                main 은 relative 라 시트가 지도 영역 밖으로 못 나간다.
+            (2) 시트는 실제 높이를 parentElement 의 --sheet-h 로 흘려보내고
+                maplibre 컨트롤이 그 값을 상속해 비켜선다. 래퍼를 끼우면
+                변수가 지도 형제 노드까지 내려가지 않는다.
+          */}
+          {isMobile && (
+            <BottomSheet
+              snap={snap}
+              onSnapChange={setSnap}
+              // 목록은 시트의 바닥 상태다. 상세일 때만 끌어내려 닫을 수 있다.
+              onDismiss={selected ? handleCloseDetail : undefined}
+              header={sheetHeader}
+            >
+              {selected ? (
+                <AreaDetail key={selected.cd} area={selected} onClose={handleCloseDetail} />
+              ) : congestion ? (
+                <AreaList areas={sortedAreas} selectedCd={selectedCd} onSelect={handleSelect} />
+              ) : (
+                <div className="h-full space-y-2 overflow-y-auto p-4">
+                  {Array.from({ length: 8 }, (_, index) => (
+                    <Skeleton key={index} className="h-10 w-full" />
+                  ))}
+                </div>
+              )}
+            </BottomSheet>
+          )}
         </main>
 
-        {selected && (
-          <div className="absolute inset-y-0 right-0 z-20 w-full max-w-sm md:static md:w-96">
-            <AreaDetail key={selected.cd} area={selected} onClose={() => setSelectedCd(null)} />
+        {/*
+          md 이상 사이드 패널. 기존처럼 흐름에 들어간다(오버레이 아님).
+          모바일 분기가 시트로 빠졌으므로 absolute/max-w-sm 우회가 필요 없어졌다.
+        */}
+        {selected && !isMobile && (
+          <div className="w-96 shrink-0">
+            <AreaDetail key={selected.cd} area={selected} onClose={handleCloseDetail} />
           </div>
         )}
       </div>
