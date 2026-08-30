@@ -7,6 +7,8 @@
  * 반드시 이 모듈을 서버(route handler)에서만 사용할 것. 인증키 은닉도 겸한다.
  */
 
+import type { RawCmrclStts } from './commerce';
+
 const BASE = 'http://openapi.seoul.go.kr:8088';
 
 /** 샘플키는 '광화문·덕수궁' 한 곳만 응답한다. 키가 없으면 데모 모드로 동작. */
@@ -249,6 +251,8 @@ export interface RawCityData {
   AREA_NM: string;
   AREA_CD: string;
   LIVE_PPLTN_STTS?: RawPpltn[];
+  /** 실시간 상권. 카드 가맹점이 거의 없는 폴리곤(공원·고궁 등 39곳)에서는 null 로 온다. */
+  LIVE_CMRCL_STTS?: RawCmrclStts | null;
   ROAD_TRAFFIC_STTS?: { AVG_ROAD_DATA?: Record<string, string> };
   PRK_STTS?: Record<string, string>[];
   SBIKE_STTS?: Record<string, string>[];

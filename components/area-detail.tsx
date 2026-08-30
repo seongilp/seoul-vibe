@@ -3,9 +3,12 @@
 import { Bike, CloudSun, Car, ParkingCircle, Ticket, Wind, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
+import { CommercePanel } from '@/components/commerce-panel';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import type { RawCmrclStts } from '@/lib/commerce';
 import { colorForRank, formatClock, formatPeople } from '@/lib/congestion';
 import { congestionRank } from '@/lib/seoul';
 import type { AreaCongestion } from '@/lib/types';
@@ -19,6 +22,8 @@ interface CityDataPayload {
     SBIKE_STTS?: Record<string, string>[];
     WEATHER_STTS?: Record<string, string>[];
     EVENT_STTS?: Record<string, string>[];
+    /** 카드 가맹점이 거의 없는 장소(공원·고궁 등 39곳)에서는 null 로 온다. */
+    LIVE_CMRCL_STTS?: RawCmrclStts | null;
   };
 }
 
@@ -35,6 +40,7 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
   const [payload, setPayload] = useState<CityDataPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState('status');
 
   useEffect(() => {
     const controller = new AbortController();
@@ -61,6 +67,22 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
   const parking = payload?.data.PRK_STTS ?? [];
   const bikes = payload?.data.SBIKE_STTS ?? [];
   const events = payload?.data.EVENT_STTS ?? [];
+
+  /*
+    121곳 중 39곳(공원 33곳 전부 + 고궁 3 + 인구밀집 3)은 LIVE_CMRCL_STTS 가 null 이다.
+    카드 가맹점이 사실상 없는 폴리곤이라 일시적 결측이 아니라 구조적이다.
+    그런 장소에서 탭을 띄우면 3분의 1 가까이가 눌러봐야 빈 카드다 — 탭 자체를 감춘다.
+    반대로 관광특구 7/7, 발달상권 28/28 은 100% 커버된다.
+  */
+  const cmrcl = payload?.data.LIVE_CMRCL_STTS ?? null;
+  const rsb = cmrcl?.CMRCL_RSB ?? [];
+  const hasCommerce = Boolean(cmrcl && (cmrcl.AREA_CMRCL_LVL || rsb.length > 0));
+  /*
+    로딩 중에는 상권 탭이 아직 없으므로 tab 이 'commerce' 인 채로 남으면 빈 화면이 된다.
+    상태를 effect 로 되돌리면(= effect 안 setState) 연쇄 렌더가 나고 eslint 도 막는다.
+    그래서 상태는 그대로 두고 렌더 시점에만 유효한 값으로 접는다.
+  */
+  const activeTab = hasCommerce ? tab : 'status';
 
   const bikeParked = bikes.reduce((sum, spot) => sum + (Number(spot.SBIKE_PARKING_CNT) || 0), 0);
   const bikeRacks = bikes.reduce((sum, spot) => sum + (Number(spot.SBIKE_RACK_CNT) || 0), 0);
@@ -93,8 +115,23 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
 
       <Separator />
 
-      <div className="flex-1 overflow-y-auto px-4 py-4">
-        <section>
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => setTab(String(value))}
+        className="flex min-h-0 flex-1 flex-col gap-0"
+      >
+        {hasCommerce && (
+          <div className="px-4 pt-3">
+            {/* h-9 은 모바일 터치 타깃 확보용. 기본 h-8 은 손가락으로 누르기 좁다. */}
+            <TabsList className="h-9 w-full">
+              <TabsTrigger value="status">현황</TabsTrigger>
+              <TabsTrigger value="commerce">상권</TabsTrigger>
+            </TabsList>
+          </div>
+        )}
+
+        <TabsContent value="status" className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <section>
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-bold" style={{ color: colorForRank(area.rank) }}>
               {area.level ?? '데이터 없음'}
@@ -218,7 +255,14 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
             )}
           </div>
         )}
-      </div>
+        </TabsContent>
+
+        {cmrcl && hasCommerce && (
+          <TabsContent value="commerce" className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+            <CommercePanel cmrcl={cmrcl} rsb={rsb} />
+          </TabsContent>
+        )}
+      </Tabs>
     </aside>
   );
 }
