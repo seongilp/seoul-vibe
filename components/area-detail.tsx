@@ -88,11 +88,22 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
 
   const bikeParked = bikes.reduce((sum, spot) => sum + (Number(spot.SBIKE_PARKING_CNT) || 0), 0);
   const bikeRacks = bikes.reduce((sum, spot) => sum + (Number(spot.SBIKE_RACK_CNT) || 0), 0);
-  const parkingAvailable = parking.reduce((sum, lot) => sum + (Number(lot.CUR_PRK_CNT) || 0), 0);
+  /*
+    CUR_PRK_CNT 는 실시간 주차 가능 면수인데, 대부분의 주차장이 빈 문자열로 보낸다
+    (CUR_PRK_YN='N' = 실시간 정보 미제공). 강남역 95곳·혜화역 24곳·청담동 16곳 모두
+    실시간 제공 0곳이었다. 이걸 Number('') || 0 으로 뭉개서 합산하면 결측이 진짜 0으로
+    둔갑해 "0면 주차 가능"(= 자리 없음)이라고 단언하게 된다. 없는 정보와 0은 다르다.
+    그래서 실시간 값을 실제로 준 주차장만 집계하고, 하나도 없으면 잔여를 아예 말하지 않는다.
+  */
+  const liveParking = parking.filter(
+    (lot) => lot.CUR_PRK_YN === 'Y' && parkedCount(lot.CUR_PRK_CNT) !== null,
+  );
+  const parkingAvailable = liveParking.reduce((sum, lot) => sum + (parkedCount(lot.CUR_PRK_CNT) ?? 0), 0);
   const parkingCapacity = parking.reduce((sum, lot) => sum + (Number(lot.CPCTY) || 0), 0);
 
+  // border-l 은 사이드 패널(md+)일 때만. 바텀시트에서는 왼쪽 테두리가 뜬금없다.
   return (
-    <aside className="bg-card border-border flex h-full w-full flex-col border-l">
+    <aside className="bg-card border-border flex h-full w-full flex-col md:border-l">
       <header className="flex items-start gap-2 px-4 pt-4 pb-3">
         <span
           className="mt-1.5 size-3 shrink-0 rounded-full"
@@ -109,9 +120,10 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
           type="button"
           onClick={onClose}
           aria-label="상세 닫기"
-          className="hover:bg-accent text-muted-foreground rounded-md p-1"
+          // 아이콘은 그대로 두고 상자만 44px 로 키운다(모바일 최소 터치 타깃).
+          className="hover:bg-accent text-muted-foreground -m-2 flex size-11 shrink-0 items-center justify-center rounded-md md:m-0 md:size-8"
         >
-          <X className="size-4" />
+          <X className="size-5 md:size-4" />
         </button>
       </header>
 
@@ -238,10 +250,22 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
 
             {parking.length > 0 && (
               <Stat icon={<ParkingCircle className="size-4" />} label="주차장">
-                <span className="text-lg font-bold">{parkingAvailable}</span>
-                <span className="text-muted-foreground ml-2 text-xs">
-                  면 주차 가능 · 총 {parkingCapacity}면 · 주차장 {parking.length}곳
-                </span>
+                {liveParking.length > 0 ? (
+                  <>
+                    <span className="text-lg font-bold">{parkingAvailable}</span>
+                    <span className="text-muted-foreground ml-2 text-xs">
+                      면 주차 가능 · 실시간 {liveParking.length}/{parking.length}곳 · 총 {parkingCapacity}면
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-lg font-bold">{parking.length}</span>
+                    <span className="text-muted-foreground ml-2 text-xs">곳 · 총 {parkingCapacity}면</span>
+                    <p className="text-muted-foreground mt-1 text-xs">
+                      실시간 잔여 면수는 제공되지 않습니다.
+                    </p>
+                  </>
+                )}
               </Stat>
             )}
 
@@ -293,6 +317,14 @@ function temperatureRange(
   if (!min || !max) return null;
   if (!Number.isFinite(Number(min)) || !Number.isFinite(Number(max))) return null;
   return { min, max };
+}
+
+/** 빈 문자열·'-' 같은 결측을 0 으로 접지 않고 null 로 구분해 돌려준다. */
+function parkedCount(raw: string | undefined): number | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function Stat({
