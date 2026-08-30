@@ -353,8 +353,14 @@ export function Dashboard() {
       {congestion && unknown > 0 && (
         <p className="border-border bg-muted/40 text-muted-foreground flex shrink-0 items-center gap-1.5 border-b px-4 py-2 text-xs">
           <CircleHelp className="size-3.5 shrink-0" aria-hidden />
-          {unknown}곳은 서울시 서버에서 혼잡도를 받지 못했습니다. 장소는 그대로 있고 혼잡도만
-          미상입니다.
+          {/*
+            121곳 중 두어 곳 빠지는 건 평소에도 흔해서 이 줄은 거의 늘 뜬다. 그때까지
+            긴 설명을 두 줄로 깔면 좁은 화면에서 지도만 빼앗긴다. 반대로 전부 미상일
+            때는 '장소가 없는 게 아니다'라는 말이 이 화면에서 가장 중요한 정보다.
+          */}
+          {unknown === sortedAreas.length
+            ? `${unknown}곳 전부 서울시 서버에서 혼잡도를 받지 못했습니다. 장소는 그대로 있고 혼잡도만 미상입니다.`
+            : `${unknown}곳은 혼잡도를 받지 못했습니다(미상).`}
         </p>
       )}
 
