@@ -32,6 +32,14 @@ interface AreaDetailProps {
   onClose: () => void;
 }
 
+/** 성공 본문과 오류 본문을 한 번에 받는 자리. JSON 이 아니면 null 이다. */
+type ApiBody = { message?: string; error?: string } | null;
+
+/** 서버 예산(업스트림 6초 + 여유)보다 넉넉하되, 사용자가 포기할 시간보다는 짧게. */
+const CLIENT_TIMEOUT_MS = 15_000;
+/** 사용자가 다른 장소를 눌러 취소한 것과 시간 초과를 구분하기 위한 표식. */
+const TIMEOUT_REASON = 'timeout';
+
 /**
  * 장소가 바뀌면 상태를 초기화해야 하는데, 그걸 effect 안에서 setState 로 하면
  * 연쇄 렌더가 난다. 대신 부모가 key={area.cd} 로 리마운트시킨다.
@@ -44,22 +52,56 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
 
   useEffect(() => {
     const controller = new AbortController();
+    /*
+      서버가 6초 안에 끝내도록 고쳤지만, 그건 서버가 응답한다는 전제다.
+      플랫폼 단에서 요청이 매달리면 스켈레톤이 영원히 남는다. 마지막 방어선으로
+      클라이언트에도 마감시한을 둬서 무한 로딩만은 절대 없게 한다.
+    */
+    const timer = setTimeout(() => controller.abort(TIMEOUT_REASON), CLIENT_TIMEOUT_MS);
 
     fetch(`/api/area/${area.cd}`, { signal: controller.signal })
       .then(async (response) => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.message ?? body.error ?? '조회 실패');
-        setPayload(body as CityDataPayload);
+        /*
+          게이트웨이 오류(504 등)의 본문은 JSON 이 아니라 평문이다. 바로 json() 을 부르면
+          파싱 에러가 그대로 사용자에게 "Unexpected token 'A'" 로 노출된다.
+          텍스트로 받아서 파싱을 시도하고, 실패하면 상태 코드로 말이 되는 문장을 만든다.
+        */
+        const text = await response.text();
+        let body: ApiBody = null;
+        try {
+          body = JSON.parse(text) as ApiBody;
+        } catch {
+          body = null;
+        }
+
+        if (!response.ok) {
+          throw new Error(
+            body?.message ?? body?.error ?? `상세 정보를 불러오지 못했습니다 (HTTP ${response.status})`,
+          );
+        }
+        if (!body) throw new Error('상세 정보의 형식을 이해할 수 없습니다.');
+        setPayload(body as unknown as CityDataPayload);
       })
       .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
+        // 장소를 바꿔서 취소된 경우는 오류가 아니다. 타임아웃으로 끊은 것만 표시한다.
+        if (controller.signal.aborted && controller.signal.reason !== TIMEOUT_REASON) return;
+        if (controller.signal.reason === TIMEOUT_REASON) {
+          setError('상세 정보를 불러오는 데 너무 오래 걸립니다. 잠시 후 다시 시도해 주세요.');
+          return;
+        }
         setError(cause instanceof Error ? cause.message : '조회 실패');
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        clearTimeout(timer);
+        if (!controller.signal.aborted || controller.signal.reason === TIMEOUT_REASON) {
+          setLoading(false);
+        }
       });
 
-    return () => controller.abort();
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [area.cd]);
 
   const weather = payload?.data.WEATHER_STTS?.[0];

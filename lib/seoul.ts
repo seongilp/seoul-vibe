@@ -140,9 +140,30 @@ export const UPSTREAM_REFRESH_SECONDS = Number(process.env.SEOUL_CACHE_TTL) || 9
 /** 상세 패널은 사용자가 누른 장소 1곳만 부르므로 더 신선하게 둬도 싸다. */
 export const DETAIL_REFRESH_SECONDS = 300;
 
+/**
+ * 업스트림 fetch 하나당 허용하는 시간(ms).
+ *
+ * 왜 필요한가: 이 API 서버는 죽을 때 연결을 거절하지 않는다. TCP 는 30ms 만에 받아주고
+ * 그 뒤로 첫 바이트를 영원히 안 보낸다(2026-08-30 관측: connect 0.03s, TTFB 무한).
+ * 타임아웃이 없으면 함수는 maxDuration 까지 매달렸다가 504 FUNCTION_INVOCATION_TIMEOUT
+ * 으로 죽는다. 사용자에게 30초 스켈레톤을 보여주느니 6초 만에 실패를 말하는 게 낫다.
+ *
+ * 왜 6초인가: 정상일 때 이 API 는 0.1~0.3초에 응답한다(citydata 는 본문 130~220KB).
+ * 6초면 정상 지연의 20배 이상이라 멀쩡한 요청을 자를 위험이 사실상 없으면서,
+ * 상세 라우트 예산(maxDuration 30초)의 5분의 1만 쓴다.
+ */
+export const UPSTREAM_TIMEOUT_MS = Number(process.env.SEOUL_TIMEOUT_MS) || 6000;
+
+/** 타임아웃으로 잘렸을 때의 실패 코드. 라우트가 이 코드로 사용자 문구를 고른다. */
+export const TIMEOUT_CODE = 'UPSTREAM_TIMEOUT';
+
 interface FetchOptions {
   /** 초 단위 캐시 수명. */
   revalidate: number;
+  /**
+   * 호출자가 거는 상위 마감시한. 목록 라우트처럼 요청 수가 많을 때
+   * 전체 예산을 넘기지 않도록 배치 전체에 하나를 공유시킨다.
+   */
   signal?: AbortSignal;
 }
 
@@ -160,6 +181,9 @@ async function callSeoul<T>(
     try {
       return await callSeoulOnce<T>(service, start, end, suffix, options);
     } catch (error) {
+      // 타임아웃은 KEY_EXHAUSTED_CODES 에 없으므로 여기서 즉시 재던져진다. 의도한 것이다.
+      // 서버가 먹통이라 안 나오는 응답을 키만 바꿔 다시 기다리면 대기 시간만 키 개수만큼
+      // 곱해져서(6초 × 3키 = 18초) 애초에 타임아웃을 건 이유가 사라진다.
       if (!(error instanceof SeoulApiFailure) || !KEY_EXHAUSTED_CODES.has(error.code)) throw error;
       lastFailure = error;
       if (!advanceKey()) break;
@@ -180,17 +204,46 @@ async function callSeoulOnce<T>(
   const tail = suffix ? `/${encodeURIComponent(suffix)}` : '';
   const url = `${BASE}/${key}/json/${service}/${start}/${end}${tail}`;
 
-  const response = await fetch(url, {
-    signal,
-    next: { revalidate },
-    headers: { Accept: 'application/json' },
-  });
+  /*
+    signal 은 Data Cache 를 깨지 않는다. 캐시 키는 url/method/headers/mode/redirect/
+    credentials/referrer 로만 만들어지고(incremental-cache/index.js generateCacheKey),
+    Next 는 백그라운드 재검증 때 signal 을 알아서 떼고 부른다(patch-fetch.js).
+    그래서 타임아웃을 붙여도 캐시 히트 경로는 그대로다.
+  */
+  const timeout = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
+  const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
 
-  if (!response.ok) {
-    throw new SeoulApiFailure('HTTP_' + response.status, `${service} 응답 실패 (HTTP ${response.status})`);
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(url, {
+      signal: deadline,
+      next: { revalidate },
+      headers: { Accept: 'application/json' },
+    });
+
+    if (!response.ok) {
+      throw new SeoulApiFailure('HTTP_' + response.status, `${service} 응답 실패 (HTTP ${response.status})`);
+    }
+
+    // 본문 읽기도 같은 마감시한 안에 둔다. 헤더만 오고 본문이 멎는 경우가 있어서,
+    // fetch 만 감싸면 여기서 다시 무한정 매달릴 수 있다.
+    text = await response.text();
+  } catch (error) {
+    if (error instanceof SeoulApiFailure) throw error;
+    // 상위 마감시한이 먼저 끊은 경우와 이 요청 자체가 느린 경우를 구분해서 말해준다.
+    if (timeout.aborted) {
+      throw new SeoulApiFailure(
+        TIMEOUT_CODE,
+        `${service}: 서울시 API 가 ${UPSTREAM_TIMEOUT_MS}ms 안에 응답하지 않았습니다.`,
+        504,
+      );
+    }
+    if (signal?.aborted) {
+      throw new SeoulApiFailure(TIMEOUT_CODE, `${service}: 전체 응답 시간을 초과했습니다.`, 504);
+    }
+    throw error;
   }
-
-  const text = await response.text();
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -291,8 +344,15 @@ const BIKE_MAX_PAGES = 4;
 /** 샘플키는 한 번에 5건까지만 허용한다 (ERROR-335). */
 const BIKE_DEMO_PAGE_SIZE = 5;
 
+/**
+ * 따릉이는 페이지를 순차로 4번 받는다. 페이지마다 6초를 기다리면 24초라
+ * maxDuration(30초)에 위험할 만큼 붙는다. 전체에 하나의 마감시한을 씌워 둔다.
+ */
+const BIKE_BUDGET_MS = 15_000;
+
 export async function fetchBikeStations(options?: Partial<FetchOptions>): Promise<RawBikeStation[]> {
   const collected: RawBikeStation[] = [];
+  const budget = AbortSignal.timeout(BIKE_BUDGET_MS);
   const demo = isDemoMode();
   const pageSize = demo ? BIKE_DEMO_PAGE_SIZE : BIKE_PAGE_SIZE;
   const maxPages = demo ? 1 : BIKE_MAX_PAGES;
@@ -305,7 +365,7 @@ export async function fetchBikeStations(options?: Partial<FetchOptions>): Promis
       start,
       end,
       '',
-      { revalidate: 60, ...options },
+      { revalidate: 60, signal: budget, ...options },
     );
     const rows = body.rentBikeStatus?.row ?? [];
     collected.push(...rows);
