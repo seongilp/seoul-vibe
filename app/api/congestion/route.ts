@@ -10,6 +10,7 @@ import {
   UPSTREAM_REFRESH_SECONDS,
   type RawPpltn,
 } from '@/lib/seoul';
+import { ppltnStore } from '@/lib/seoul-stale';
 import type { AreaCongestion, CongestionResponse, ForecastPoint } from '@/lib/types';
 
 /** 121개 장소를 순회하므로 기본 타임아웃보다 넉넉히 잡는다. */
@@ -72,9 +73,24 @@ export async function GET(): Promise<NextResponse<CongestionResponse>> {
     if (result.ok && result.value) resolvedByCd.set(result.value.AREA_CD, result.value);
   });
 
+  // 이번에 받아온 것만 보관한다. 실패한 장소는 예전 값을 그대로 두고 나이만 먹게 둔다.
+  resolvedByCd.forEach((raw, cd) => ppltnStore.remember(cd, raw));
+
+  /*
+    부분 stale: 121곳 중 일부만 실패하는 게 흔하다(동시 8건이라 웨이브마다 결과가 갈린다).
+    실패한 장소만 골라서 마지막 성공값으로 메운다. 성공한 장소는 손대지 않는다.
+    메울 수 없으면(이력 없음 / 30분 초과) 지금까지처럼 level=null 로 남긴다 — 결측은 결측으로.
+  */
+  let staleCount = 0;
+
   const areas: AreaCongestion[] = AREAS.map((area) => {
-    const raw = resolvedByCd.get(area.cd);
+    const fresh = resolvedByCd.get(area.cd);
+    const fallback = fresh ? null : ppltnStore.recall(area.cd);
+    if (fallback) staleCount += 1;
+    const raw = fresh ?? fallback?.value;
     return {
+      stale: Boolean(fallback),
+      staleAt: fallback ? new Date(fallback.at).toISOString() : null,
       cd: area.cd,
       nm: area.nm,
       cat: area.cat,
@@ -95,7 +111,13 @@ export async function GET(): Promise<NextResponse<CongestionResponse>> {
     15분 내내 반쯤 빈 지도를 본다. 결손이 있으면 캐시 수명을 30초로 줄여 빨리 회복시킨다.
     전부 받아온 정상 응답의 캐시 동작은 그대로다.
   */
-  const complete = resolvedByCd.size === targets.length;
+
+  /*
+    stale 로 메운 응답도 같은 이유로 짧게 캐시한다. 오히려 더 급하다 — 과거 데이터를
+    15분 붙잡고 있으면 업스트림이 1분 뒤 살아나도 사용자는 계속 옛날 값을 본다.
+    (staleCount>0 이면 resolved < targets 이므로 complete 는 이미 false 다. 명시만 해 둔다.)
+  */
+  const complete = resolvedByCd.size === targets.length && staleCount === 0;
   const cacheControl = complete
     ? `public, s-maxage=${UPSTREAM_REFRESH_SECONDS}, stale-while-revalidate=${UPSTREAM_REFRESH_SECONDS * 4}`
     : `public, s-maxage=${PARTIAL_CACHE_SECONDS}`;
@@ -106,6 +128,7 @@ export async function GET(): Promise<NextResponse<CongestionResponse>> {
       updatedAt: new Date().toISOString(),
       resolved: resolvedByCd.size,
       total: AREAS.length,
+      stale: staleCount,
       areas,
     },
     {

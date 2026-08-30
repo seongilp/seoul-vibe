@@ -203,6 +203,10 @@ export function Dashboard() {
               <span>
                 {congestion.resolved}/{congestion.total} 수신
               </span>
+              {/* 수신 수는 '이번에 새로 받은' 곳만 센다. 과거값으로 메운 곳은 따로 밝힌다. */}
+              {congestion.stale > 0 && (
+                <span className="text-amber-400">과거값 {congestion.stale}</span>
+              )}
             </span>
           )}
           <Button
@@ -224,6 +228,19 @@ export function Dashboard() {
       {error && (
         <p className="border-destructive/40 bg-destructive/10 shrink-0 border-b px-4 py-2 text-xs">
           {error}
+        </p>
+      )}
+
+      {/*
+        과거값이 섞여 있으면 반드시 밝힌다. 위 헤더의 수신 통계는 md 이상에서만 보여서
+        좁은 화면 사용자는 그걸 못 본다 — 이 줄은 모든 화면에서 뜬다.
+        색만으로 구분하지 않도록 아이콘과 문장을 같이 둔다.
+      */}
+      {congestion && congestion.stale > 0 && (
+        <p className="flex shrink-0 items-center gap-1.5 border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
+          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+          최신 갱신에 실패한 {congestion.stale}곳은 마지막으로 받은 과거 데이터입니다. 목록에서 수집
+          시각을 확인하세요.
         </p>
       )}
 

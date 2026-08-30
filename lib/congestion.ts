@@ -25,6 +25,25 @@ export function formatPeople(value: number | null): string {
   return String(value);
 }
 
+/**
+ * ISO 시각 → 서울 기준 'HH:MM'.
+ *
+ * stale 표기는 서울시가 준 관측 시각(PPLTN_TIME, 이미 KST 문자열)이 아니라
+ * **우리가 받아온 시각**을 쓴다. 둘은 다르고, 사용자가 알아야 하는 건 후자다.
+ * 서버는 UTC 로 도니 표시할 때 반드시 Asia/Seoul 로 되돌린다.
+ */
+export function formatIsoClock(value: string | null | undefined): string {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleTimeString('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
 /** '2026-08-29 17:45' → '17:45' */
 export function formatClock(value: string | null): string {
   if (!value) return '—';

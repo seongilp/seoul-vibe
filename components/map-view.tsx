@@ -95,12 +95,19 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect, bottomI
         source: AREA_SOURCE,
         paint: {
           'fill-color': FILL_COLOR,
+          /*
+            stale(마지막 성공값으로 메운 장소)은 흐리게 칠해 신선한 곳과 구분한다.
+            지도 위에는 텍스트를 얹을 수단이 없어(text-field 는 feature-state 를 못 읽는다)
+            여기서는 명도 차이가 전부다. 문장으로 밝히는 건 헤더 배너·목록·상세가 담당한다.
+          */
           'fill-opacity': [
             'case',
             ['boolean', ['feature-state', 'selected'], false],
             0.62,
             ['boolean', ['feature-state', 'hover'], false],
             0.5,
+            ['boolean', ['feature-state', 'stale'], false],
+            0.12,
             0.32,
           ],
         },
@@ -120,7 +127,7 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect, bottomI
             1.8,
             1.2,
           ],
-          'line-opacity': 0.95,
+          'line-opacity': ['case', ['boolean', ['feature-state', 'stale'], false], 0.4, 0.95],
         },
       });
 
@@ -259,7 +266,7 @@ export function MapView({ areas, bikes, showBikes, selectedCd, onSelect, bottomI
 
     const apply = () => {
       areas.forEach((area) => {
-        map.setFeatureState({ source: AREA_SOURCE, id: area.cd }, { rank: area.rank });
+        map.setFeatureState({ source: AREA_SOURCE, id: area.cd }, { rank: area.rank, stale: area.stale });
       });
     };
 

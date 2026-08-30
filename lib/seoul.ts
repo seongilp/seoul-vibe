@@ -9,7 +9,15 @@
 
 import type { RawCmrclStts } from './commerce';
 
-const BASE = 'http://openapi.seoul.go.kr:8088';
+/**
+ * 업스트림 주소. 기본값은 서울 열린데이터광장 본 서버다.
+ *
+ * SEOUL_API_BASE 로 갈아끼울 수 있게 열어 둔 이유: 이 서버의 장애(연결은 받아주고
+ * 응답을 영원히 안 보냄)는 우리가 만들 수 없고 기다릴 수도 없다. stale 폴백이 실제로
+ * 도는지 확인하려면 로컬에서 그 장애를 흉내 낸 서버로 향하게 하는 수밖에 없다.
+ * 프로덕션에는 이 변수를 설정하지 않는다 — 설정하지 않으면 동작이 이전과 완전히 같다.
+ */
+const BASE = process.env.SEOUL_API_BASE?.trim() || 'http://openapi.seoul.go.kr:8088';
 
 /** 샘플키는 '광화문·덕수궁' 한 곳만 응답한다. 키가 없으면 데모 모드로 동작. */
 export const SAMPLE_KEY = 'sample';

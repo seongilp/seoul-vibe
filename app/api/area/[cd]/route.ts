@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 import { AREA_BY_CD } from '@/lib/areas';
 import { fetchCityData, isDemoMode, SAMPLE_AREA_NM, SeoulApiFailure, TIMEOUT_CODE } from '@/lib/seoul';
+import { cityDataStore } from '@/lib/seoul-stale';
 
 export const maxDuration = 30;
 export const revalidate = 300;
@@ -43,9 +44,30 @@ export async function GET(
     if (!data) {
       return failure('no_data', `'${area.nm}' 상세 데이터가 비어 있습니다.`, 404);
     }
-    return NextResponse.json({ demo, area, data });
+    cityDataStore.remember(cd, data);
+    return NextResponse.json({ demo, area, data, stale: false, staleAt: null });
   } catch (error) {
     if (error instanceof SeoulApiFailure) {
+      /*
+        업스트림이 죽었을 때 마지막 성공값이 남아 있으면 그걸 내준다.
+        빈 화면보다는 30분 이내의 과거 화면이 낫다. 대신 stale 플래그를 반드시 같이 보내
+        클라이언트가 '과거 데이터'라고 못박게 한다 — 신선한 척 보여주면 지금보다 나쁘다.
+      */
+      const fallback = cityDataStore.recall(cd);
+      if (fallback) {
+        return NextResponse.json(
+          {
+            demo,
+            area,
+            data: fallback.value,
+            stale: true,
+            staleAt: new Date(fallback.at).toISOString(),
+          },
+          // stale 응답은 CDN 이 붙잡으면 안 된다. 업스트림이 살아나는 즉시 신선한 값으로 돌아가야 한다.
+          { headers: NO_STORE },
+        );
+      }
+
       // 타임아웃은 우리 잘못도, 사용자가 고칠 수 있는 것도 아니다. 원인을 그대로 말한다.
       const message =
         error.code === TIMEOUT_CODE

@@ -9,11 +9,15 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { RawCmrclStts } from '@/lib/commerce';
-import { colorForRank, formatClock, formatPeople } from '@/lib/congestion';
+import { colorForRank, formatClock, formatIsoClock, formatPeople } from '@/lib/congestion';
 import { congestionRank } from '@/lib/seoul';
 import type { AreaCongestion } from '@/lib/types';
 
 interface CityDataPayload {
+  /** 업스트림 실패로 마지막 성공값을 대신 받은 응답인지. */
+  stale?: boolean;
+  /** stale 일 때 그 값을 받아온 시각(ISO). */
+  staleAt?: string | null;
   data: {
     LIVE_PPLTN_STTS?: Record<string, string>[];
     // ROAD_TRAFFIC_SPD 는 숫자로 내려온다.
@@ -156,6 +160,11 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
           <h2 className="truncate text-base font-bold">{area.nm}</h2>
           <p className="text-muted-foreground text-xs">
             {area.cat} · {formatClock(area.observedAt)} 기준
+            {area.stale && (
+              // 목록에서 이미 밝혔지만, 상세를 열면 헤더가 제일 먼저 눈에 들어온다.
+              // 혼잡도 숫자 바로 위에서 한 번 더 못박는다.
+              <span className="text-amber-400"> · 최신 갱신 실패</span>
+            )}
           </p>
         </div>
         <button
@@ -238,6 +247,20 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
         {error && (
           <p className="border-destructive/40 bg-destructive/10 text-destructive-foreground rounded-md border p-3 text-xs leading-relaxed">
             {error}
+          </p>
+        )}
+
+        {/*
+          상세(citydata)는 목록과 별개로 실패할 수 있다. 업스트림이 죽어 마지막 성공값을
+          받아 온 경우, 아래 날씨·도로·주차 숫자가 전부 과거값이라는 걸 그 위에서 밝힌다.
+          색만이 아니라 문장으로 말한다.
+        */}
+        {payload?.stale && (
+          <p className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-300">
+            {formatIsoClock(payload.staleAt)} 기준 · 최신 갱신 실패
+            <span className="text-muted-foreground block">
+              서울시 서버가 응답하지 않아 마지막으로 받은 데이터를 보여줍니다.
+            </span>
           </p>
         )}
 

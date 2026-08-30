@@ -22,14 +22,23 @@ export interface AreaCongestion {
   max: number | null;
   observedAt: string | null;
   forecast: ForecastPoint[];
+  /**
+   * 이번 갱신에서 못 받아 마지막 성공값으로 대신 채운 장소인지.
+   * true 면 화면이 반드시 '과거 데이터'라고 밝혀야 한다.
+   */
+  stale: boolean;
+  /** stale 일 때, 그 값을 실제로 받아온 시각(ISO). 신선하면 null. */
+  staleAt: string | null;
 }
 
 export interface CongestionResponse {
   demo: boolean;
   updatedAt: string;
-  /** 조회에 성공한 장소 수 / 전체 장소 수 */
+  /** 이번 갱신에서 실제로 새로 받아온 장소 수 / 전체 장소 수 */
   resolved: number;
   total: number;
+  /** 마지막 성공값으로 대신 채운 장소 수. resolved 와 겹치지 않는다. */
+  stale: number;
   areas: AreaCongestion[];
 }
 
