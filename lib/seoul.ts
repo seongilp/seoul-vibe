@@ -1,0 +1,312 @@
+/**
+ * 서울 열린데이터광장 실시간 도시데이터 클라이언트.
+ *
+ * 주의 (Vercel 배포 관련):
+ * upstream 이 http://openapi.seoul.go.kr:8088 (평문 HTTP + 비표준 포트) 이라
+ * 브라우저에서 직접 호출하면 https 배포에서 mixed content 로 차단된다.
+ * 반드시 이 모듈을 서버(route handler)에서만 사용할 것. 인증키 은닉도 겸한다.
+ */
+
+const BASE = 'http://openapi.seoul.go.kr:8088';
+
+/** 샘플키는 '광화문·덕수궁' 한 곳만 응답한다. 키가 없으면 데모 모드로 동작. */
+export const SAMPLE_KEY = 'sample';
+export const SAMPLE_AREA_NM = '광화문·덕수궁';
+
+/**
+ * 인증키 목록. 앞이 주 키, 뒤는 예비 키다.
+ *
+ * 라운드로빈으로 매 호출마다 키를 바꾸면 안 된다. 키가 URL 경로에 들어가는 API 라
+ * URL 이 매번 달라지고, Next 의 fetch 캐시가 전부 미스나서 오히려 호출량이 폭증한다.
+ * 그래서 주 키를 고정해 쓰고, 일일 트래픽 초과(ERROR-337)나 키 오류(INFO-100)가
+ * 났을 때만 다음 키로 넘어간다.
+ */
+/** 예비 키는 SEOUL_API_KEY_2, _3, ... 순으로 원하는 만큼 붙일 수 있다. */
+const MAX_KEYS = 10;
+
+export function getApiKeys(): string[] {
+  const names = ['SEOUL_API_KEY'];
+  for (let n = 2; n <= MAX_KEYS; n += 1) names.push(`SEOUL_API_KEY_${n}`);
+
+  const keys = names
+    .map((name) => process.env[name]?.trim())
+    .filter((key): key is string => Boolean(key));
+
+  // 같은 키를 두 번 넣으면 failover 가 무의미해지므로 중복은 걷어낸다.
+  const unique = [...new Set(keys)];
+  return unique.length > 0 ? unique : [SAMPLE_KEY];
+}
+
+export function getApiKey(): string {
+  return getApiKeys()[activeKeyIndex] ?? SAMPLE_KEY;
+}
+
+export function isDemoMode(): boolean {
+  return getApiKeys()[0] === SAMPLE_KEY;
+}
+
+/**
+ * 현재 사용 중인 키의 인덱스. 워밍된 함수 인스턴스 안에서만 유지된다.
+ * Vercel 함수는 언제든 새로 뜨므로 정확한 상태가 아니라 최선의 추정이다.
+ */
+let activeKeyIndex = 0;
+
+/** 키 자체 문제로 실패한 코드들. 다른 키로 재시도할 가치가 있다. */
+const KEY_EXHAUSTED_CODES = new Set([
+  'ERROR-337', // 일별 트래픽 제한 초과
+  'INFO-100', // 인증키가 유효하지 않음
+]);
+
+function advanceKey(): boolean {
+  const total = getApiKeys().length;
+  if (total < 2) return false;
+  activeKeyIndex = (activeKeyIndex + 1) % total;
+  return true;
+}
+
+/** 혼잡도 4단계. 서울시가 내려주는 문자열 그대로가 키다. */
+export const CONGESTION_LEVELS = ['여유', '보통', '약간 붐빔', '붐빔'] as const;
+export type CongestionLevel = (typeof CONGESTION_LEVELS)[number];
+
+export function congestionRank(level: string | null | undefined): number {
+  const i = CONGESTION_LEVELS.indexOf(level as CongestionLevel);
+  return i < 0 ? -1 : i;
+}
+
+export interface SeoulApiError {
+  code: string;
+  message: string;
+}
+
+export class SeoulApiFailure extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status = 502,
+  ) {
+    super(message);
+    this.name = 'SeoulApiFailure';
+  }
+}
+
+/**
+ * 서울 API는 실패해도 HTTP 200 에 에러 바디를 준다. RESULT.CODE 를 반드시 확인해야 한다.
+ * 성공 코드는 INFO-000.
+ */
+function assertOk(body: unknown, context: string): void {
+  const result = extractResult(body);
+  if (!result) return;
+  if (result.code === 'INFO-000') return;
+  throw new SeoulApiFailure(result.code, `${context}: ${result.code} ${result.message}`);
+}
+
+function extractResult(body: unknown): SeoulApiError | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const record = body as Record<string, unknown>;
+
+  // citydata 계열: { RESULT: { 'RESULT.CODE': ..., 'RESULT.MESSAGE': ... } }
+  const direct = record.RESULT as Record<string, unknown> | undefined;
+  if (direct) {
+    const code = (direct['RESULT.CODE'] ?? direct.CODE) as string | undefined;
+    const message = (direct['RESULT.MESSAGE'] ?? direct.MESSAGE) as string | undefined;
+    if (code) return { code, message: message ?? '' };
+  }
+
+  // bikeList 계열: { rentBikeStatus: { RESULT: { CODE, MESSAGE } } }
+  for (const value of Object.values(record)) {
+    if (typeof value === 'object' && value !== null && 'RESULT' in value) {
+      const nested = (value as Record<string, unknown>).RESULT as Record<string, unknown>;
+      const code = (nested['RESULT.CODE'] ?? nested.CODE) as string | undefined;
+      const message = (nested['RESULT.MESSAGE'] ?? nested.MESSAGE) as string | undefined;
+      if (code) return { code, message: message ?? '' };
+    }
+  }
+  return null;
+}
+
+/**
+ * 혼잡도 캐시 수명(초).
+ *
+ * 이 값이 곧 일일 API 호출량을 결정한다. 갱신 1회가 121콜이고, Next Data Cache 가
+ * 도는 동안에는 방문자가 몇 명이든 업스트림 호출이 0 이기 때문이다.
+ *   호출/일 = 121 × 86400 / TTL
+ * 업스트림 자체는 약 5분 주기라 그보다 짧게 잡으면 같은 값을 다시 받아올 뿐이다.
+ * SEOUL_CACHE_TTL 로 조정할 수 있다.
+ */
+export const UPSTREAM_REFRESH_SECONDS = Number(process.env.SEOUL_CACHE_TTL) || 900;
+
+/** 상세 패널은 사용자가 누른 장소 1곳만 부르므로 더 신선하게 둬도 싸다. */
+export const DETAIL_REFRESH_SECONDS = 300;
+
+interface FetchOptions {
+  /** 초 단위 캐시 수명. */
+  revalidate: number;
+  signal?: AbortSignal;
+}
+
+async function callSeoul<T>(
+  service: string,
+  start: number,
+  end: number,
+  suffix: string,
+  options: FetchOptions,
+): Promise<T> {
+  const attempts = getApiKeys().length;
+  let lastFailure: SeoulApiFailure | null = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await callSeoulOnce<T>(service, start, end, suffix, options);
+    } catch (error) {
+      if (!(error instanceof SeoulApiFailure) || !KEY_EXHAUSTED_CODES.has(error.code)) throw error;
+      lastFailure = error;
+      if (!advanceKey()) break;
+    }
+  }
+
+  throw lastFailure ?? new SeoulApiFailure('NO_KEY', `${service}: 사용 가능한 인증키가 없습니다.`);
+}
+
+async function callSeoulOnce<T>(
+  service: string,
+  start: number,
+  end: number,
+  suffix: string,
+  { revalidate, signal }: FetchOptions,
+): Promise<T> {
+  const key = encodeURIComponent(getApiKey());
+  const tail = suffix ? `/${encodeURIComponent(suffix)}` : '';
+  const url = `${BASE}/${key}/json/${service}/${start}/${end}${tail}`;
+
+  const response = await fetch(url, {
+    signal,
+    next: { revalidate },
+    headers: { Accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new SeoulApiFailure('HTTP_' + response.status, `${service} 응답 실패 (HTTP ${response.status})`);
+  }
+
+  const text = await response.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    // 인증키 오류 등 일부 케이스는 XML 로 떨어진다.
+    const code = /<(?:RESULT\.)?CODE>([^<]+)</.exec(text)?.[1] ?? 'NON_JSON_RESPONSE';
+    const message = /<(?:RESULT\.)?MESSAGE>([^<]+)</.exec(text)?.[1] ?? text.slice(0, 200);
+    throw new SeoulApiFailure(code, `${service}: ${message}`);
+  }
+
+  assertOk(body, service);
+  return body as T;
+}
+
+/* ------------------------------------------------------------------ */
+/* 실시간 인구/혼잡도 (citydata_ppltn) — 장소당 약 2KB, 목록 렌더링용   */
+/* ------------------------------------------------------------------ */
+
+export interface PpltnForecast {
+  FCST_TIME: string;
+  FCST_CONGEST_LVL: string;
+  FCST_PPLTN_MIN: string;
+  FCST_PPLTN_MAX: string;
+}
+
+export interface RawPpltn {
+  AREA_NM: string;
+  AREA_CD: string;
+  AREA_CONGEST_LVL: string;
+  AREA_CONGEST_MSG: string;
+  AREA_PPLTN_MIN: string;
+  AREA_PPLTN_MAX: string;
+  MALE_PPLTN_RATE: string;
+  FEMALE_PPLTN_RATE: string;
+  RESNT_PPLTN_RATE: string;
+  NON_RESNT_PPLTN_RATE: string;
+  PPLTN_TIME: string;
+  FCST_PPLTN?: PpltnForecast[];
+  [key: string]: unknown;
+}
+
+export async function fetchPpltn(areaNm: string, options?: Partial<FetchOptions>): Promise<RawPpltn | null> {
+  const body = await callSeoul<{ 'SeoulRtd.citydata_ppltn'?: RawPpltn[] }>(
+    'citydata_ppltn',
+    1,
+    5,
+    areaNm,
+    { revalidate: UPSTREAM_REFRESH_SECONDS, ...options },
+  );
+  return body['SeoulRtd.citydata_ppltn']?.[0] ?? null;
+}
+
+/* ------------------------------------------------------------------ */
+/* 통합 도시데이터 (citydata) — 장소당 약 170KB, 상세 패널용            */
+/* ------------------------------------------------------------------ */
+
+export interface RawCityData {
+  AREA_NM: string;
+  AREA_CD: string;
+  LIVE_PPLTN_STTS?: RawPpltn[];
+  ROAD_TRAFFIC_STTS?: { AVG_ROAD_DATA?: Record<string, string> };
+  PRK_STTS?: Record<string, string>[];
+  SBIKE_STTS?: Record<string, string>[];
+  WEATHER_STTS?: Record<string, string>[];
+  CHARGER_STTS?: Record<string, string>[];
+  EVENT_STTS?: Record<string, string>[];
+  SUB_STTS?: Record<string, string>[];
+  ACDNT_CNTRL_STTS?: Record<string, string>[];
+  [key: string]: unknown;
+}
+
+export async function fetchCityData(areaNm: string, options?: Partial<FetchOptions>): Promise<RawCityData | null> {
+  const body = await callSeoul<{ CITYDATA?: RawCityData }>('citydata', 1, 5, areaNm, {
+    revalidate: DETAIL_REFRESH_SECONDS,
+    ...options,
+  });
+  return body.CITYDATA ?? null;
+}
+
+/* ------------------------------------------------------------------ */
+/* 따릉이 실시간 대여소 (bikeList) — 1회 최대 1000건                    */
+/* ------------------------------------------------------------------ */
+
+export interface RawBikeStation {
+  stationId: string;
+  stationName: string;
+  stationLatitude: string;
+  stationLongitude: string;
+  rackTotCnt: string;
+  parkingBikeTotCnt: string;
+  shared: string;
+}
+
+const BIKE_PAGE_SIZE = 1000;
+const BIKE_MAX_PAGES = 4;
+/** 샘플키는 한 번에 5건까지만 허용한다 (ERROR-335). */
+const BIKE_DEMO_PAGE_SIZE = 5;
+
+export async function fetchBikeStations(options?: Partial<FetchOptions>): Promise<RawBikeStation[]> {
+  const collected: RawBikeStation[] = [];
+  const demo = isDemoMode();
+  const pageSize = demo ? BIKE_DEMO_PAGE_SIZE : BIKE_PAGE_SIZE;
+  const maxPages = demo ? 1 : BIKE_MAX_PAGES;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const start = page * pageSize + 1;
+    const end = start + pageSize - 1;
+    const body = await callSeoul<{ rentBikeStatus?: { row?: RawBikeStation[] } }>(
+      'bikeList',
+      start,
+      end,
+      '',
+      { revalidate: 60, ...options },
+    );
+    const rows = body.rentBikeStatus?.row ?? [];
+    collected.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+
+  return collected;
+}
