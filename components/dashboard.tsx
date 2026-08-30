@@ -11,7 +11,7 @@ import { Legend } from '@/components/legend';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useIsMobile } from '@/lib/use-media-query';
+import { useIsCompact } from '@/lib/use-media-query';
 import type { BikeResponse, CongestionResponse } from '@/lib/types';
 
 // maplibre 는 window 에 의존하므로 SSR 을 끈다.
@@ -39,9 +39,9 @@ export function Dashboard() {
   const [selectedCd, setSelectedCd] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /** 모바일 바텀시트 높이. md 이상에서는 시트를 아예 렌더하지 않으므로 무시된다. */
+  /** 바텀시트 높이. lg 이상에서는 시트를 아예 렌더하지 않으므로 무시된다. */
   const [snap, setSnap] = useState<SheetSnap>('peek');
-  const isMobile = useIsMobile();
+  const isCompact = useIsCompact();
 
   // 순수 fetch. setState 를 하지 않아 effect 본문에서 동기 호출해도 연쇄 렌더가 없다.
   const fetchCongestion = useCallback(async (): Promise<CongestionResponse> => {
@@ -248,12 +248,12 @@ export function Dashboard() {
             selectedCd={selectedCd}
             onSelect={handleSelect}
             // 시트가 처음 덮는 만큼(peek) 비워 두고 서울을 그 위에 맞춘다.
-            bottomInsetRatio={isMobile ? SNAP_RATIO.peek : 0}
+            bottomInsetRatio={isCompact ? SNAP_RATIO.peek : 0}
           />
           <Legend showBikes={showBikes} />
 
           {/*
-            모바일 바텀시트. main 안에 직접 두는 게 두 가지 이유로 중요하다.
+            좁은 화면(<1024px) 바텀시트. main 안에 직접 두는 게 두 가지 이유로 중요하다.
             (1) 이전 패널은 absolute inset-y-0 인데 positioned 조상이 없어 뷰포트
                 기준으로 잡혔고, 그래서 헤더까지 덮어 로고가 "S" 만 남았다.
                 main 은 relative 라 시트가 지도 영역 밖으로 못 나간다.
@@ -261,7 +261,7 @@ export function Dashboard() {
                 maplibre 컨트롤이 그 값을 상속해 비켜선다. 래퍼를 끼우면
                 변수가 지도 형제 노드까지 내려가지 않는다.
           */}
-          {isMobile && (
+          {isCompact && (
             <BottomSheet
               snap={snap}
               onSnapChange={setSnap}
@@ -285,10 +285,10 @@ export function Dashboard() {
         </main>
 
         {/*
-          md 이상 사이드 패널. 기존처럼 흐름에 들어간다(오버레이 아님).
-          모바일 분기가 시트로 빠졌으므로 absolute/max-w-sm 우회가 필요 없어졌다.
+          lg 이상 사이드 패널. 기존처럼 흐름에 들어간다(오버레이 아님).
+          좁은 화면 분기가 시트로 빠졌으므로 absolute/max-w-sm 우회가 필요 없어졌다.
         */}
-        {selected && !isMobile && (
+        {selected && !isCompact && (
           <div className="w-96 shrink-0">
             <AreaDetail key={selected.cd} area={selected} onClose={handleCloseDetail} />
           </div>

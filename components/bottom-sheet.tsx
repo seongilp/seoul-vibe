@@ -24,6 +24,22 @@ const SNAP_ORDER: SheetSnap[] = ['peek', 'half', 'full'];
 /** 이 비율보다 아래로 끌어내리면 스냅이 아니라 닫기로 해석한다. */
 const DISMISS_RATIO = 0.16;
 
+/**
+ * 탭과 드래그를 가르는 기준.
+ *
+ * 손잡이 위에서 pointerdown 하면 부모 div 가 포인터를 캡처한다(드래그가 요소
+ * 밖으로 나가도 이벤트를 받아야 하므로 필수다). 그 결과 pointerup 타깃이 div 가
+ * 되고, click 은 down/up 타깃의 공통 조상에서 끝나 버튼의 onClick 이 영영 안 불린다.
+ * 그래서 탭 판정을 포인터 이벤트에서 직접 한다.
+ *
+ * 8px 는 브라우저·OS 가 쓰는 통상적인 터치 슬롭(Android 8dp, iOS 약 10px)에 맞춘
+ * 값이다. 이보다 작으면 손가락 떨림이 드래그로 잡히고, 크게 잡으면 짧은 드래그가
+ * 탭으로 오인돼 시트가 엉뚱한 단계로 튄다.
+ * 600ms 는 "누르고 있다가 마음이 바뀐" 경우를 탭으로 안 세기 위한 상한이다.
+ */
+const TAP_SLOP_PX = 8;
+const TAP_MAX_MS = 600;
+
 interface BottomSheetProps {
   snap: SheetSnap;
   onSnapChange: (snap: SheetSnap) => void;
@@ -55,7 +71,17 @@ export function BottomSheet({
   const sheetRef = useRef<HTMLDivElement>(null);
   /** 드래그 중에만 픽셀 높이를 직접 잡는다. null 이면 스냅 비율(퍼센트)을 쓴다. */
   const [dragHeight, setDragHeight] = useState<number | null>(null);
-  const dragRef = useRef<{ startY: number; startHeight: number; parentHeight: number } | null>(null);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    startTime: number;
+    startHeight: number;
+    parentHeight: number;
+    /** pointerdown 이 손잡이 버튼 위에서 시작했나. 헤더를 끌 때는 탭으로 안 센다. */
+    fromHandle: boolean;
+    /** 슬롭을 넘겨 움직였나. 넘겼으면 탭이 아니라 드래그다. */
+    moved: boolean;
+  } | null>(null);
 
   /*
     maplibre 기본 컨트롤(저작권 배지 등)은 지도 DOM 안에 있어서 React 로 위치를
@@ -84,9 +110,13 @@ export function BottomSheet({
     if (!sheet || !parent) return;
 
     dragRef.current = {
+      startX: event.clientX,
       startY: event.clientY,
+      startTime: event.timeStamp,
       startHeight: sheet.offsetHeight,
       parentHeight: parent.clientHeight,
+      fromHandle: Boolean((event.target as HTMLElement | null)?.closest('[data-sheet-handle]')),
+      moved: false,
     };
     setDragHeight(sheet.offsetHeight);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -96,11 +126,24 @@ export function BottomSheet({
     const drag = dragRef.current;
     if (!drag) return;
 
+    if (
+      Math.abs(event.clientY - drag.startY) > TAP_SLOP_PX ||
+      Math.abs(event.clientX - drag.startX) > TAP_SLOP_PX
+    ) {
+      drag.moved = true;
+    }
+
     // 위로 끌면 커진다. 아래 한계는 0 까지 열어 둬야 '닫기' 제스처를 판정할 수 있다.
     const next = drag.startHeight - (event.clientY - drag.startY);
     const max = drag.parentHeight * SNAP_RATIO.full;
     setDragHeight(Math.max(0, Math.min(next, max)));
   }, []);
+
+  /** 손잡이를 탭(=드래그 없이 누르고 뗌)하면 다음 단계로 올린다. 큰 타깃이라 실수가 적다. */
+  const handleToggle = useCallback(() => {
+    const index = SNAP_ORDER.indexOf(snap);
+    onSnapChange(SNAP_ORDER[(index + 1) % SNAP_ORDER.length]);
+  }, [snap, onSnapChange]);
 
   const handlePointerUp = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -108,6 +151,14 @@ export function BottomSheet({
       if (!drag) return;
       dragRef.current = null;
       event.currentTarget.releasePointerCapture(event.pointerId);
+
+      // 손잡이 위에서 거의 안 움직이고 뗐으면 드래그가 아니라 탭이다.
+      // 높이를 되돌린 뒤 다음 단계로 올린다(스냅 근처라 아래 nearest 로직은 어차피 무동작).
+      if (drag.fromHandle && !drag.moved && event.timeStamp - drag.startTime < TAP_MAX_MS) {
+        setDragHeight(null);
+        handleToggle();
+        return;
+      }
 
       const sheet = sheetRef.current;
       const height = sheet?.offsetHeight ?? drag.startHeight;
@@ -125,14 +176,8 @@ export function BottomSheet({
       );
       if (nearest !== snap) onSnapChange(nearest);
     },
-    [onDismiss, onSnapChange, snap],
+    [handleToggle, onDismiss, onSnapChange, snap],
   );
-
-  /** 손잡이를 탭(=드래그 없이 누르고 뗌)하면 다음 단계로 올린다. 큰 타깃이라 실수가 적다. */
-  const handleToggle = useCallback(() => {
-    const index = SNAP_ORDER.indexOf(snap);
-    onSnapChange(SNAP_ORDER[(index + 1) % SNAP_ORDER.length]);
-  }, [snap, onSnapChange]);
 
   const dragging = dragHeight !== null;
 
@@ -156,9 +201,17 @@ export function BottomSheet({
         onPointerCancel={handlePointerUp}
       >
         {/* 손잡이 자체는 4px 이지만 위아래 여백까지 24px 를 확보해 잡기 쉽게 만든다. */}
+        {/*
+          포인터 탭은 handlePointerUp 이 처리한다. 아래 onClick 은 키보드
+          (Enter/Space)가 합성한 click 전용이다. 합성 click 은 detail 이 0 이라
+          실제 포인터 click 과 구분되므로 같은 탭이 두 번 처리될 일이 없다.
+        */}
         <button
           type="button"
-          onClick={handleToggle}
+          data-sheet-handle
+          onClick={(event) => {
+            if (event.detail === 0) handleToggle();
+          }}
           aria-label="시트 높이 조절"
           className="flex h-6 w-full items-center justify-center"
         >

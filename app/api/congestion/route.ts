@@ -17,7 +17,7 @@ export const maxDuration = 60;
 /**
  * 라우트 자체는 항상 실행한다. 정적 프리렌더되면 빌드 타임에 서울 API 를 121번
  * 호출하게 되고, 사용자의 새로고침도 CDN 캐시에 막혀 무의미해진다.
- * 캐싱은 업스트림 fetch 의 revalidate(180초)가 담당한다.
+ * 캐싱은 업스트림 fetch 의 revalidate(UPSTREAM_REFRESH_SECONDS, 기본 900초)가 담당한다.
  */
 export const dynamic = 'force-dynamic';
 

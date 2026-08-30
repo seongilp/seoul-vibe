@@ -101,9 +101,9 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
   const parkingAvailable = liveParking.reduce((sum, lot) => sum + (parkedCount(lot.CUR_PRK_CNT) ?? 0), 0);
   const parkingCapacity = parking.reduce((sum, lot) => sum + (Number(lot.CPCTY) || 0), 0);
 
-  // border-l 은 사이드 패널(md+)일 때만. 바텀시트에서는 왼쪽 테두리가 뜬금없다.
+  // border-l 은 사이드 패널(lg+)일 때만. 바텀시트에서는 왼쪽 테두리가 뜬금없다.
   return (
-    <aside className="bg-card border-border flex h-full w-full flex-col md:border-l">
+    <aside className="bg-card border-border flex h-full w-full flex-col lg:border-l">
       <header className="flex items-start gap-2 px-4 pt-4 pb-3">
         <span
           className="mt-1.5 size-3 shrink-0 rounded-full"
