@@ -63,6 +63,8 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
   }, [area.cd]);
 
   const weather = payload?.data.WEATHER_STTS?.[0];
+  // 결측일 때 '-°' 를 그리느니 예보 줄 자체를 접는다.
+  const forecastRange = temperatureRange(weather?.MIN_TEMP, weather?.MAX_TEMP);
   const road = payload?.data.ROAD_TRAFFIC_STTS?.AVG_ROAD_DATA;
   const parking = payload?.data.PRK_STTS ?? [];
   const bikes = payload?.data.SBIKE_STTS ?? [];
@@ -189,11 +191,24 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
           <div className="space-y-4">
             {weather && (
               <Stat icon={<CloudSun className="size-4" />} label="날씨">
+                {/* 실황(기상청 초단기실황)끼리만 한 줄에 둔다. 셋 다 지금 이 순간의 관측값이다. */}
                 <span className="text-lg font-bold">{weather.TEMP}°</span>
                 <span className="text-muted-foreground ml-2 text-xs">
-                  최고 {weather.MAX_TEMP}° · 최저 {weather.MIN_TEMP}° · 습도 {weather.HUMIDITY}% · 바람{' '}
-                  {weather.WIND_SPD}m/s
+                  습도 {weather.HUMIDITY}% · 바람 {weather.WIND_SPD}m/s
                 </span>
+                {/*
+                  MAX_TEMP/MIN_TEMP 는 기상청 동네예보의 일 최고/최저기온(TMX/TMN) 예보값이고
+                  TEMP 는 초단기실황 관측값이다. 출처가 다르니 예보가 빗나가면 실황이 예보
+                  최고를 넘는 게 정상이다(2026-08-30 15:20 서울 12곳 전부 TEMP > MAX_TEMP).
+                  둘을 한 줄에 붙여 놓으면 "현재 28.1°인데 최고 26.0°" 처럼 자기모순으로 읽혀서
+                  줄을 나누고 '예보' 라벨을 붙였다. 값 자체는 API 가 준 그대로 둔다.
+                */}
+                {forecastRange && (
+                  <p className="text-muted-foreground mt-1.5 text-[11px]">
+                    <span className="text-foreground/70 font-medium">예보</span> 오늘 최저 {forecastRange.min}° ·
+                    최고 {forecastRange.max}°
+                  </p>
+                )}
                 <p className="text-muted-foreground mt-1 text-xs">{weather.PCP_MSG}</p>
               </Stat>
             )}
@@ -265,6 +280,19 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
       </Tabs>
     </aside>
   );
+}
+
+/**
+ * 서울시 API 는 결측을 '-' 나 빈 문자열로 흘려보낸다. 숫자로 읽히는 값일 때만 통과시킨다.
+ * 값을 보정하지는 않는다 — 예보가 실황보다 낮아도 그대로 내보낸다.
+ */
+function temperatureRange(
+  min: string | undefined,
+  max: string | undefined,
+): { min: string; max: string } | null {
+  if (!min || !max) return null;
+  if (!Number.isFinite(Number(min)) || !Number.isFinite(Number(max))) return null;
+  return { min, max };
 }
 
 function Stat({

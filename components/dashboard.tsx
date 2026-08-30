@@ -219,7 +219,7 @@ export function Dashboard() {
             selectedCd={selectedCd}
             onSelect={setSelectedCd}
           />
-          <Legend showBikes={showBikes} />
+          <Legend showBikes={showBikes} occluded={selected !== null} />
         </main>
 
         {selected && (
