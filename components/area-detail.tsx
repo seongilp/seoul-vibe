@@ -207,6 +207,18 @@ export function AreaDetail({ area, onClose }: AreaDetailProps) {
               </span>
             )}
           </div>
+          {/*
+            혼잡도 4단계(AREA_CONGEST_LVL)는 절대 인구가 아니라 그 장소의 평소 대비 상대값이다.
+            실측: 출근 시간 여의도 8.4만명이 '여유', 노들섬 700명이 '약간 붐빔' — 100배 차이인데 등급은 반대다.
+            이 문장을 빼면 "여의도가 초록불이니 한산하다"로 오독돼 앱이 고장 난 것처럼 보인다.
+            상권 탭이 같은 함정을 이 문구로 풀었다 — 톤을 맞춘다. 규모 비교는 옆의 인구 수와 지도 라벨이 담당한다.
+          */}
+          {area.rank >= 0 && (
+            <p className="text-muted-foreground mt-2 text-[11px] leading-relaxed">
+              이 장소의 <b className="text-foreground/80 font-medium">평소 대비</b> 혼잡도입니다. 장소끼리 비교할 수
+              없습니다 — 규모는 인구 수로 보세요.
+            </p>
+          )}
           {area.msg && <p className="text-muted-foreground mt-2 text-xs leading-relaxed">{area.msg}</p>}
         </section>
 
