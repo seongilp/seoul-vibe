@@ -38,6 +38,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# Neon/Vercel 통합이 설치하는 에이전트 스킬 스캐폴딩 — 앱 코드가 아니라 개발 도구다.
+.agents/
+.claude/
+skills-lock.json
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

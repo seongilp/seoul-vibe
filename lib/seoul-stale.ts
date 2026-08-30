@@ -1,12 +1,27 @@
 import type { RawCmrclStts } from './commerce';
+import { keepAlive } from './keep-alive';
 import type { RawCityData, RawPpltn } from './seoul';
 import { StaleStore } from './stale-cache';
+import {
+  cleanupOldSnapshots,
+  loadSnapshot,
+  loadSnapshots,
+  persistSnapshot,
+  persistSnapshots,
+  type DbSnapshot,
+} from './stale-db';
 
 /**
  * 서울 API 응답의 마지막 성공본 보관소.
  *
  * 라우트 모듈이 아니라 여기에 두는 이유: 목록 라우트와 상세 라우트가 각자 인스턴스를
  * 만들면 같은 함수 인스턴스 안에서도 서로의 성공 이력을 못 본다. 저장소는 하나여야 한다.
+ *
+ * 2단 구조: 메모리(L1, StaleStore)가 1차, Neon(L2, stale-db)이 2차다.
+ *  - 성공값은 메모리에 담고, 동시에 fire-and-forget 으로 Neon 에도 저장한다.
+ *  - 폴백은 메모리부터 본다(빠르고 DB 를 안 친다). 메모리에 없을 때만 Neon 을 읽는다.
+ *  - Neon 히트는 메모리에 다시 채워 넣어(warm) 다음 요청은 DB 를 안 치게 한다.
+ * 이렇게 하면 콜드 인스턴스나 배포 직후에도 다른 인스턴스가 받아 둔 스냅샷을 살릴 수 있다.
  */
 
 /**
@@ -14,6 +29,18 @@ import { StaleStore } from './stale-cache';
  * 그래서 상한을 전체 장소 수보다 넉넉히 잡아 사실상 evict 가 일어나지 않게 한다.
  */
 export const ppltnStore = new StaleStore<RawPpltn>(200);
+
+/**
+ * 혼잡도 stale 의 최대 나이(ms). 영구 저장이 붙었으니 30분에서 다시 판단했다.
+ *
+ * 왜 여전히 짧게(60분) 가는가: 이 값의 알맹이는 **실시간 인구/혼잡도 등급**이다. 몇 시간 전
+ * 붐빔/여유는 아예 다른 시간대의 이야기라, 저장이 영구든 아니든 의미가 낡는 속도는 그대로다.
+ * 다만 30분은 실측 장애(몇 분~수십 분)의 대부분을 덮되 조금 더 긴 장애에서 콜드 인스턴스가
+ * DB 에서 꺼낼 창이 좁았다. 60분으로 넓히면 그 창이 두 배가 되면서도, 하루 대부분의 시간대에서
+ * 같은 '시간 밴드'를 벗어나지 않는다. 넘으면 stale 을 버리고 '미상'으로 정직하게 남긴다.
+ */
+export const PPLTN_STALE_MAX_AGE_MS =
+  Number(process.env.SEOUL_PPLTN_STALE_MAX_AGE_MS) || 60 * 60 * 1000;
 
 /* ------------------------------------------------------------------ */
 /* 상세(citydata) — 화면에 필요한 필드만 추려서 보관한다                */
@@ -105,3 +132,93 @@ export const cityDataStore = new StaleStore<StoredCityData>(130);
  */
 export const CITYDATA_STALE_MAX_AGE_MS =
   Number(process.env.SEOUL_CITYDATA_STALE_MAX_AGE_MS) || 3 * 60 * 60 * 1000;
+
+/* ------------------------------------------------------------------ */
+/* 2단(메모리 L1 + Neon L2) 오케스트레이션                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 상세 성공값을 저장한다. 메모리에 즉시 담고(투영), Neon 에는 fire-and-forget 으로 보낸다.
+ * DB 쓰기를 await 하지 않으므로 사용자 응답이 느려지지 않는다. rejection 은 삼켜서
+ * unhandledRejection 이 안 나게 한다.
+ */
+export function rememberCityData(cd: string, raw: RawCityData, at = Date.now()): Promise<void> {
+  const projected = projectCityData(raw);
+  cityDataStore.remember(cd, projected, at);
+  // waitUntil 로 등록해 응답을 막지 않으면서도 쓰기가 끝까지 살아남게 한다.
+  // 반환 프로미스는 테스트가 await 로 쓰기 완료를 기다릴 때만 쓴다(라우트는 무시).
+  const write = persistSnapshot('citydata', cd, at, projected).catch(() => {});
+  keepAlive(write);
+  return write;
+}
+
+/**
+ * 상세 stale 을 꺼낸다. 메모리 → Neon 순. Neon 히트는 메모리에 warm 한다.
+ * 없거나 너무 오래됐으면 null(호출부가 정직하게 실패를 표시).
+ */
+export async function recallCityData(cd: string): Promise<DbSnapshot<StoredCityData> | null> {
+  const mem = cityDataStore.recall(cd, CITYDATA_STALE_MAX_AGE_MS);
+  if (mem) return { value: mem.value, at: mem.at };
+
+  const db = await loadSnapshot<StoredCityData>('citydata', cd, CITYDATA_STALE_MAX_AGE_MS);
+  if (db) {
+    // 다음 요청은 DB 를 안 치도록 메모리를 채운다.
+    cityDataStore.remember(cd, db.value, db.at);
+    return db;
+  }
+  return null;
+}
+
+/**
+ * 목록 성공값들을 저장한다. 메모리에 각각 담고, Neon 에는 한 번의 배치 UPSERT 로 보낸다.
+ * fire-and-forget 이라 목록 응답을 지연시키지 않는다.
+ */
+export function rememberPpltnBatch(
+  entries: { cd: string; value: RawPpltn }[],
+  at = Date.now(),
+): Promise<void> {
+  for (const { cd, value } of entries) ppltnStore.remember(cd, value, at);
+  const write = persistSnapshots(
+    'ppltn',
+    entries.map(({ cd, value }) => ({ cd, at, payload: value })),
+  ).catch(() => {});
+  keepAlive(write);
+  return write;
+}
+
+/**
+ * 목록의 결측 장소들에 대해 stale 을 꺼낸다. 먼저 메모리를 훑고(동기), 메모리에도 없는
+ * 것만 Neon 에서 배치로 읽는다. Neon 히트는 메모리에 warm 한다.
+ *
+ * 왜 이 구조인가: 목록은 121곳을 한 번에 다루므로, 메모리 히트가 많으면 DB 를 아예 안 치거나
+ * 소수 키만 조회한다. 결과는 cd→스냅샷 Map 으로, 라우트의 기존 stale/미상 분기가 그대로 쓴다.
+ */
+export async function recallPpltnBatch(cds: string[]): Promise<Map<string, DbSnapshot<RawPpltn>>> {
+  const out = new Map<string, DbSnapshot<RawPpltn>>();
+  const missing: string[] = [];
+
+  for (const cd of cds) {
+    const mem = ppltnStore.recall(cd, PPLTN_STALE_MAX_AGE_MS);
+    if (mem) out.set(cd, { value: mem.value, at: mem.at });
+    else missing.push(cd);
+  }
+
+  if (missing.length > 0) {
+    const db = await loadSnapshots<RawPpltn>('ppltn', missing, PPLTN_STALE_MAX_AGE_MS);
+    for (const [cd, hit] of db) {
+      ppltnStore.remember(cd, hit.value, hit.at);
+      out.set(cd, hit);
+    }
+  }
+  return out;
+}
+
+/**
+ * 만료된 Neon 행을 낮은 확률로 정리한다(fire-and-forget). UPSERT 키 덕에 행 수는 이미
+ * 242 이하로 묶여 있어 급하지 않으므로, 매 요청마다가 아니라 가끔만 친다. 가장 긴 수명
+ * (citydata 3시간)을 기준으로 그보다 오래된 건 어떤 종류든 이미 못 쓰는 값이라 지운다.
+ */
+export function maybeCleanupStale(probability = 0.02): void {
+  if (Math.random() >= probability) return;
+  void cleanupOldSnapshots(CITYDATA_STALE_MAX_AGE_MS).catch(() => {});
+}

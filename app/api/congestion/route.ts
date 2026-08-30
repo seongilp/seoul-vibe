@@ -10,7 +10,7 @@ import {
   UPSTREAM_REFRESH_SECONDS,
   type RawPpltn,
 } from '@/lib/seoul';
-import { ppltnStore } from '@/lib/seoul-stale';
+import { maybeCleanupStale, recallPpltnBatch, rememberPpltnBatch } from '@/lib/seoul-stale';
 import type { AreaCongestion, CongestionResponse, ForecastPoint } from '@/lib/types';
 
 /** 121개 장소를 순회하므로 기본 타임아웃보다 넉넉히 잡는다. */
@@ -73,19 +73,25 @@ export async function GET(): Promise<NextResponse<CongestionResponse>> {
     if (result.ok && result.value) resolvedByCd.set(result.value.AREA_CD, result.value);
   });
 
-  // 이번에 받아온 것만 보관한다. 실패한 장소는 예전 값을 그대로 두고 나이만 먹게 둔다.
-  resolvedByCd.forEach((raw, cd) => ppltnStore.remember(cd, raw));
+  // 이번에 받아온 것만 보관한다(메모리 L1 + Neon L2, DB 쓰기는 fire-and-forget).
+  // 실패한 장소는 예전 값을 그대로 두고 나이만 먹게 둔다.
+  rememberPpltnBatch([...resolvedByCd].map(([cd, value]) => ({ cd, value })));
+  // 만료 행 정리는 가끔만(저확률) 친다. 매 요청 DELETE 는 낭비다.
+  maybeCleanupStale();
 
   /*
     부분 stale: 121곳 중 일부만 실패하는 게 흔하다(동시 8건이라 웨이브마다 결과가 갈린다).
     실패한 장소만 골라서 마지막 성공값으로 메운다. 성공한 장소는 손대지 않는다.
-    메울 수 없으면(이력 없음 / 30분 초과) 지금까지처럼 level=null 로 남긴다 — 결측은 결측으로.
+    폴백은 메모리 → Neon 순으로 찾는다 — 콜드 인스턴스도 다른 인스턴스가 받아 둔 걸 살린다.
+    메울 수 없으면(이력 없음 / 나이 초과) 지금까지처럼 level=null 로 남긴다 — 결측은 결측으로.
   */
+  const missingCds = AREAS.filter((area) => !resolvedByCd.has(area.cd)).map((area) => area.cd);
+  const fallbacks = await recallPpltnBatch(missingCds);
   let staleCount = 0;
 
   const areas: AreaCongestion[] = AREAS.map((area) => {
     const fresh = resolvedByCd.get(area.cd);
-    const fallback = fresh ? null : ppltnStore.recall(area.cd);
+    const fallback = fresh ? null : fallbacks.get(area.cd) ?? null;
     if (fallback) staleCount += 1;
     const raw = fresh ?? fallback?.value;
     return {
