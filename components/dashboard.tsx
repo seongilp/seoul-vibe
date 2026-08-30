@@ -1,16 +1,16 @@
 'use client';
 
-import { Activity, Bike, RefreshCw, TriangleAlert } from 'lucide-react';
+import { Activity, Bike, CircleHelp, RefreshCw, TriangleAlert } from 'lucide-react';
 import dynamic from 'next/dynamic';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { AreaDetail } from '@/components/area-detail';
 import { AreaList } from '@/components/area-list';
 import { BottomSheet, SNAP_RATIO, type SheetSnap } from '@/components/bottom-sheet';
 import { Legend } from '@/components/legend';
+import { ListError, ListLoading } from '@/components/list-placeholder';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
 import { useIsCompact } from '@/lib/use-media-query';
 import type { BikeResponse, CongestionResponse } from '@/lib/types';
 
@@ -32,6 +32,17 @@ const MapView = dynamic(() => import('@/components/map-view').then((m) => m.MapV
  */
 const POLL_INTERVAL_MS = 15 * 60 * 1000;
 
+/**
+ * 목록 조회의 클라이언트 마감시한.
+ *
+ * 서버는 121곳 전체에 20초 예산(SEOUL_LIST_BUDGET_MS)을 두고 무슨 일이 있어도
+ * 응답하지만, 그건 서버가 응답한다는 전제다. 플랫폼 단에서 요청이 매달리면
+ * congestion 이 영원히 null 이라 스켈레톤이 안 사라진다. 무한 로딩만은 없도록
+ * 마지막 방어선을 둔다. 상세 패널(area-detail)이 이미 같은 이유로 쓰는 장치다.
+ * 30초는 서버 예산 20초 + 콜드 스타트 여유다.
+ */
+const CLIENT_TIMEOUT_MS = 30_000;
+
 export function Dashboard() {
   const [congestion, setCongestion] = useState<CongestionResponse | null>(null);
   const [bikes, setBikes] = useState<BikeResponse | null>(null);
@@ -39,17 +50,41 @@ export function Dashboard() {
   const [selectedCd, setSelectedCd] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /*
+    혼잡도 조회가 확정 실패했는지. error 는 따릉이 실패도 같이 쓰는 배너용이라
+    목록을 실패 UI 로 바꿀지 판단하는 데는 못 쓴다. 이 상태만 목록 분기에 쓴다.
+  */
+  const [listFailed, setListFailed] = useState(false);
   /** 바텀시트 높이. lg 이상에서는 시트를 아예 렌더하지 않으므로 무시된다. */
   const [snap, setSnap] = useState<SheetSnap>('peek');
   const isCompact = useIsCompact();
+  /*
+    폴링 콜백은 effect 안에서 한 번만 만들어지므로 최신 congestion 을 클로저로
+    못 본다. 실패 시 '표시할 데이터가 이미 있는가'를 판단해야 해서 ref 로 흘린다.
+    (congestion 을 effect 의존성에 넣으면 갱신할 때마다 폴링이 재시작된다.)
+  */
+  const congestionRef = useRef<CongestionResponse | null>(null);
+  useEffect(() => {
+    congestionRef.current = congestion;
+  }, [congestion]);
 
   // 순수 fetch. setState 를 하지 않아 effect 본문에서 동기 호출해도 연쇄 렌더가 없다.
   const fetchCongestion = useCallback(async (): Promise<CongestionResponse> => {
     // cache 옵션을 주지 않아 CDN/브라우저 캐시를 그대로 탄다.
     // 강제 새로고침은 handleRefresh 에서 캐시 무효화 파라미터로 처리한다.
-    const response = await fetch('/api/congestion');
+    const response = await fetch('/api/congestion', {
+      signal: AbortSignal.timeout(CLIENT_TIMEOUT_MS),
+    });
     if (!response.ok) throw new Error(`혼잡도 조회 실패 (HTTP ${response.status})`);
     return (await response.json()) as CongestionResponse;
+  }, []);
+
+  /** 예외를 사용자가 읽을 수 있는 한 문장으로. 타임아웃은 원인이 다르니 따로 말한다. */
+  const describeFailure = useCallback((cause: unknown): string => {
+    if (cause instanceof DOMException && cause.name === 'TimeoutError') {
+      return '혼잡도를 불러오는 데 너무 오래 걸립니다.';
+    }
+    return cause instanceof Error ? cause.message : '혼잡도 조회 실패';
   }, []);
 
   useEffect(() => {
@@ -61,8 +96,13 @@ export function Dashboard() {
         if (cancelled) return;
         setCongestion(data);
         setError(null);
+        setListFailed(false);
       } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : '혼잡도 조회 실패');
+        if (cancelled) return;
+        setError(describeFailure(cause));
+        // 이미 받아 둔 데이터가 있으면 목록은 그대로 두고 배너로만 알린다.
+        // 아무것도 없으면 스켈레톤이 아니라 실패를 보여줘야 한다.
+        setListFailed((previous) => previous || congestionRef.current === null);
       }
     };
 
@@ -98,22 +138,27 @@ export function Dashboard() {
       stopPolling();
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [fetchCongestion]);
+  }, [describeFailure, fetchCongestion]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       // 사용자가 명시적으로 누른 경우에만 캐시를 건너뛴다.
-      const response = await fetch(`/api/congestion?t=${Date.now()}`, { cache: 'no-store' });
+      const response = await fetch(`/api/congestion?t=${Date.now()}`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(CLIENT_TIMEOUT_MS),
+      });
       if (!response.ok) throw new Error(`혼잡도 조회 실패 (HTTP ${response.status})`);
       setCongestion((await response.json()) as CongestionResponse);
       setError(null);
+      setListFailed(false);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '혼잡도 조회 실패');
+      setError(describeFailure(cause));
+      setListFailed(congestionRef.current === null);
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [describeFailure]);
 
   // 따릉이는 토글을 켤 때 처음 한 번만 불러온다. 최대 4000건이라 기본 로드에 넣지 않는다.
   useEffect(() => {
@@ -171,13 +216,64 @@ export function Dashboard() {
     setSnap('peek');
   }, []);
 
+  /** 혼잡도를 못 받은 장소 수. rank -1 이 미상이다(과거값으로 메운 곳은 rank 가 있다). */
+  const unknown = useMemo(() => areas.filter((area) => area.rank < 0).length, [areas]);
+
+  /*
+    시트 헤더 문구.
+
+    이전에는 무조건 `장소 {길이}곳` 이었다. 아직 못 받았거나 조회가 실패한 상태에서도
+    배열이 비어 있다는 이유로 '장소 0곳' 이라고 단정했고, 사용자는 그걸
+    "서울에 장소가 없다" 로 읽었다. 실제로는 121곳이 그대로 있고 혼잡도만 못 받은 것이다.
+    그래서 로딩 / 실패 / 전부 미상 / 일부 미상 / 정상을 각각 다른 문장으로 가른다.
+    수는 '아는 사실'일 때만 말하고, 모르면 모른다고 쓴다.
+  */
+  const sheetSummary = useMemo(() => {
+    if (listFailed) {
+      return { title: '혼잡도를 불러오지 못했습니다', note: '아래에서 다시 시도할 수 있습니다' };
+    }
+    if (!congestion) {
+      return { title: '장소 불러오는 중', note: '서울시 실시간 도시데이터' };
+    }
+    const total = sortedAreas.length;
+    if (unknown === total) {
+      // 장소가 없는 게 아니라 혼잡도를 못 받은 것이다. 둘을 같은 문장에 못 섞는다.
+      return { title: `장소 ${total}곳 · 혼잡도 미상`, note: '서울시 서버가 혼잡도를 주지 않았습니다' };
+    }
+    if (unknown > 0) {
+      return { title: `장소 ${total}곳 · 미상 ${unknown}곳`, note: '붐비는 순 · 탭하면 상세' };
+    }
+    return { title: `장소 ${total}곳`, note: '붐비는 순 · 탭하면 상세' };
+  }, [congestion, listFailed, sortedAreas.length, unknown]);
+
   // 목록 모드일 때만 시트 상단에 제목을 얹는다. 상세는 AreaDetail 이 자체 헤더를 갖는다.
   const sheetHeader = selected ? null : (
     <div className="px-4 pb-2">
-      <p className="text-sm font-bold">장소 {sortedAreas.length}곳</p>
-      <p className="text-muted-foreground text-xs">붐비는 순 · 탭하면 상세</p>
+      <p className="text-sm font-bold">{sheetSummary.title}</p>
+      <p className="text-muted-foreground text-xs">{sheetSummary.note}</p>
     </div>
   );
+
+  /*
+    목록 자리에 무엇을 그릴지 한 곳에서 정한다. 사이드바와 바텀시트가 같은 판단을
+    쓰게 해야 한쪽에만 실패 UI 가 붙는 사고가 다시 안 난다.
+  */
+  const renderList = (skeletonRows: number, titled: boolean) => {
+    if (congestion) {
+      return <AreaList areas={sortedAreas} selectedCd={selectedCd} onSelect={handleSelect} />;
+    }
+    if (listFailed) {
+      return (
+        <ListError
+          message={error}
+          onRetry={() => void handleRefresh()}
+          retrying={refreshing}
+          titled={titled}
+        />
+      );
+    }
+    return <ListLoading rows={skeletonRows} />;
+  };
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden overscroll-none">
@@ -225,7 +321,11 @@ export function Dashboard() {
         </div>
       </header>
 
-      {error && (
+      {/*
+        목록이 실패 UI 로 바뀐 상태에서는 같은 문장이 배너에도 뜬다. 좁은 화면에서
+        같은 말을 두 번 쌓는 건 정보가 아니라 소음이라, 그때는 배너를 접는다.
+      */}
+      {error && !listFailed && (
         <p className="border-destructive/40 bg-destructive/10 shrink-0 border-b px-4 py-2 text-xs">
           {error}
         </p>
@@ -244,18 +344,22 @@ export function Dashboard() {
         </p>
       )}
 
+      {/*
+        혼잡도를 아예 못 받은 곳도 반드시 밝힌다. 헤더의 '119/121 수신' 통계는
+        md 이상에서만 보여서 모바일 사용자는 결손을 알 길이 없었다.
+        과거값(위 배너)과 달리 여기엔 보여줄 값 자체가 없으므로 경고색이 아니라
+        중립 톤으로 둔다 — 잘못된 값을 보고 있는 게 아니라 값이 없는 것이다.
+      */}
+      {congestion && unknown > 0 && (
+        <p className="border-border bg-muted/40 text-muted-foreground flex shrink-0 items-center gap-1.5 border-b px-4 py-2 text-xs">
+          <CircleHelp className="size-3.5 shrink-0" aria-hidden />
+          {unknown}곳은 서울시 서버에서 혼잡도를 받지 못했습니다. 장소는 그대로 있고 혼잡도만
+          미상입니다.
+        </p>
+      )}
+
       <div className="flex min-h-0 flex-1">
-        <nav className="border-border hidden w-72 shrink-0 border-r lg:block">
-          {congestion ? (
-            <AreaList areas={sortedAreas} selectedCd={selectedCd} onSelect={handleSelect} />
-          ) : (
-            <div className="space-y-2 p-4">
-              {Array.from({ length: 12 }, (_, index) => (
-                <Skeleton key={index} className="h-10 w-full" />
-              ))}
-            </div>
-          )}
-        </nav>
+        <nav className="border-border hidden w-72 shrink-0 border-r lg:block">{renderList(12, true)}</nav>
 
         <main className="relative min-w-0 flex-1">
           <MapView
@@ -288,14 +392,8 @@ export function Dashboard() {
             >
               {selected ? (
                 <AreaDetail key={selected.cd} area={selected} onClose={handleCloseDetail} />
-              ) : congestion ? (
-                <AreaList areas={sortedAreas} selectedCd={selectedCd} onSelect={handleSelect} />
               ) : (
-                <div className="h-full space-y-2 overflow-y-auto p-4">
-                  {Array.from({ length: 8 }, (_, index) => (
-                    <Skeleton key={index} className="h-10 w-full" />
-                  ))}
-                </div>
+                renderList(8, false)
               )}
             </BottomSheet>
           )}

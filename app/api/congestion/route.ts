@@ -117,10 +117,22 @@ export async function GET(): Promise<NextResponse<CongestionResponse>> {
     15분 붙잡고 있으면 업스트림이 1분 뒤 살아나도 사용자는 계속 옛날 값을 본다.
     (staleCount>0 이면 resolved < targets 이므로 complete 는 이미 false 다. 명시만 해 둔다.)
   */
+  /*
+    브라우저에는 max-age=0 을 명시한다.
+
+    왜: Vercel 엣지는 s-maxage / stale-while-revalidate 를 자기가 소비하고 클라이언트
+    응답에서는 지워 버린다. 그래서 브라우저가 실제로 받는 헤더는 'public' 한 줄뿐이고,
+    max-age 가 없으면 신선도가 정의되지 않아 크로미움이 휴리스틱 캐시로 재사용한다.
+    실측에서 그 일이 났다 — 업스트림이 죽어 stale 로 바뀐 뒤에도 브라우저가 이전
+    응답(41KB)을 1ms 만에 되돌려줘서 '과거값' 배너가 뜨지 않았다.
+    max-age=0, must-revalidate 면 매번 되물어보되 그 요청은 CDN 캐시에서 끝나므로
+    함수 호출은 늘지 않는다. s-maxage 는 그대로라 CDN 동작은 바뀌지 않는다.
+  */
   const complete = resolvedByCd.size === targets.length && staleCount === 0;
+  const clientFreshness = 'public, max-age=0, must-revalidate';
   const cacheControl = complete
-    ? `public, s-maxage=${UPSTREAM_REFRESH_SECONDS}, stale-while-revalidate=${UPSTREAM_REFRESH_SECONDS * 4}`
-    : `public, s-maxage=${PARTIAL_CACHE_SECONDS}`;
+    ? `${clientFreshness}, s-maxage=${UPSTREAM_REFRESH_SECONDS}, stale-while-revalidate=${UPSTREAM_REFRESH_SECONDS * 4}`
+    : `${clientFreshness}, s-maxage=${PARTIAL_CACHE_SECONDS}`;
 
   return NextResponse.json(
     {
