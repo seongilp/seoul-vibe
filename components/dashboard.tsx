@@ -279,7 +279,7 @@ export function Dashboard() {
     <div className="flex h-dvh flex-col overflow-hidden overscroll-none">
       <header className="border-border flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b py-3 pt-[max(0.75rem,env(safe-area-inset-top))] pr-[max(1rem,env(safe-area-inset-right))] pl-[max(1rem,env(safe-area-inset-left))]">
         <Activity className="text-primary size-5" aria-hidden />
-        <h1 className="text-base font-bold">Seoul Vibe</h1>
+        <h1 className="text-base font-bold">서울나우</h1>
         <span className="text-muted-foreground hidden text-xs sm:inline">
           서울시 주요 {congestion?.total ?? 121}장소 실시간 혼잡도
         </span>

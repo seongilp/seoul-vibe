@@ -17,9 +17,18 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: 'Seoul Vibe — 서울 실시간 혼잡도',
+  title: '서울나우 — 서울 실시간 혼잡도',
   description:
     '서울시 주요 121장소의 실시간 인구 혼잡도와 따릉이 대여소 현황을 지도에 얹어 봅니다. 서울 열린데이터광장 실시간 도시데이터 기반.',
+  applicationName: '서울나우',
+  appleWebApp: { title: '서울나우' },
+  openGraph: {
+    title: '서울나우 — 서울 실시간 혼잡도',
+    description: '서울시 주요 121장소의 실시간 인구 혼잡도와 따릉이 대여소 현황을 지도에서.',
+    siteName: '서울나우',
+    locale: 'ko_KR',
+    type: 'website',
+  },
 };
 
 /*
